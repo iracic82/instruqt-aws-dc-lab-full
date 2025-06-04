@@ -1,6 +1,7 @@
 - name: Promote and configure Domain Controllers
   hosts: windows
   gather_facts: no
+
   tasks:
     - name: Install AD, DNS, DHCP roles
       win_feature:
@@ -14,16 +15,16 @@
     - name: Promote first server as new forest root domain
       win_domain:
         dns_domain_name: corp.infolab
-        safe_mode_password: P@ssword123
-        domain_admin_user: Administrator
-        domain_admin_password: P@ssword123
+        safe_mode_password: "{{ ansible_password }}"
+        domain_admin_user: "{{ ansible_user }}"
+        domain_admin_password: "{{ ansible_password }}"
       when: inventory_hostname == "dc1"
 
     - name: Join second server to existing domain
       win_domain_membership:
         dns_domain_name: corp.infolab
-        domain_admin_user: Administrator
-        domain_admin_password: P@ssword123
+        domain_admin_user: "{{ ansible_user }}"
+        domain_admin_password: "{{ ansible_password }}"
         state: domain
       when: inventory_hostname == "dc2"
 

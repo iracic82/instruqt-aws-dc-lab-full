@@ -8,11 +8,8 @@ terraform {
   required_version = ">= 1.3.0"
 }
 
-provider "aws" {
-  region     = var.aws_region
-  access_key = var.Access_Key_AWS
-  secret_key = var.Access_Secret_AWS
-}
+
+data "aws_availability_zones" "available" {}
 
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
@@ -113,7 +110,7 @@ data "aws_ami" "windows" {
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["Windows_Server-2022-English-Full-Base-*"]
+    values = ["Windows_Server-2025-English-Full-Base-*"]
   }
 }
 
@@ -123,7 +120,7 @@ resource "aws_instance" "dc1" {
   subnet_id              = aws_subnet.public_a.id
   key_name               = aws_key_pair.rdp.key_name
   vpc_security_group_ids = [aws_security_group.rdp_sg.id]
-  user_data              = file("${path.module}/scripts/winrm-init.ps1")
+  user_data              = file("./scripts/winrm-init.ps1")
   tags = {
     Name = "dc1"
   }
@@ -132,15 +129,11 @@ resource "aws_instance" "dc1" {
 resource "aws_instance" "dc2" {
   ami                    = data.aws_ami.windows.id
   instance_type          = "t3.medium"
-  subnet_id              = aws_subnet.public_a.id
+  subnet_id              = aws_subnet.public_b.id
   key_name               = aws_key_pair.rdp.key_name
   vpc_security_group_ids = [aws_security_group.rdp_sg.id]
-  user_data              = file("${path.module}/scripts/winrm-init.ps1")
+  user_data              = file("./scripts/winrm-init.ps1")
   tags = {
     Name = "dc2"
   }
-}
-
-output "dc_public_ips" {
-  value = [aws_instance.dc1.public_ip, aws_instance.dc2.public_ip]
 }

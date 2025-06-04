@@ -88,19 +88,19 @@ resource "aws_security_group" "rdp_sg" {
 }
 
 resource "tls_private_key" "rdp_key" {
-  provider = aws.eu-central-1
+  
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
 resource "aws_key_pair" "rdp" {
-  provider = aws.eu-central-1
+  
   key_name   = "instruqt-dc-key"
   public_key = tls_private_key.rdp_key.public_key_openssh
 }
 
 resource "local_sensitive_file" "private_key" {
-  provider = aws.eu-central-1
+  
   content         = tls_private_key.rdp_key.private_key_pem
   filename        = "${path.module}/instruqt-dc-key.pem"
   file_permission = "0400"

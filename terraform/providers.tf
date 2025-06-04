@@ -21,4 +21,3 @@ provider "aws" {
   alias      = "eu-central-1"
 }
 
-data "aws_availability_zones" "available" {}

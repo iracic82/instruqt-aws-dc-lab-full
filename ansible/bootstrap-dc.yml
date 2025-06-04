@@ -23,7 +23,7 @@
     - name: Join second server to existing domain
       win_domain_membership:
         dns_domain_name: corp.infolab
-        domain_admin_user: "{{ ansible_user }}"
+        domain_admin_user: "corp.infolab\\Administrator"
         domain_admin_password: "{{ domain_admin_password }}"
         state: domain
       when: inventory_hostname == "dc2"

@@ -3,14 +3,6 @@ variable "aws_region" {
   default = "eu-central-1"
 }
 
-variable "Access_Key_AWS" {
-  type = string
-}
-
-variable "Access_Secret_AWS" {
-  type = string
-}
-
 variable "vpc_cidr" {
   type    = string
   default = "10.100.0.0/16"

@@ -1,6 +1,6 @@
 variable "aws_region" {
   type    = string
-  default = "us-central-1"
+  default = "eu-central-1"
 }
 
 variable "Access_Key_AWS" {

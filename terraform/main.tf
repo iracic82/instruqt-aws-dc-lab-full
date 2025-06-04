@@ -97,7 +97,7 @@ resource "tls_private_key" "rdp_key" {
 }
 
 resource "aws_key_pair" "rdp" {
-  
+  provider = aws.eu-central-1
   key_name   = "instruqt-dc-key"
   public_key = tls_private_key.rdp_key.public_key_openssh
 }

@@ -1,5 +1,8 @@
 
-data "aws_availability_zones" "available" {}
+data "aws_availability_zones" "available" {
+  provider = aws.eu-central-1
+  state = "available"
+}
 
 resource "aws_vpc" "main" {
   provider             = aws.eu-central-1

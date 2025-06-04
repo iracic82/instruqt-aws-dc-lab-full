@@ -110,6 +110,7 @@ resource "local_sensitive_file" "private_key" {
 }
 
 data "aws_ami" "windows" {
+  provider = aws.eu-central-1
   most_recent = true
   owners      = ["amazon"]
   filter {

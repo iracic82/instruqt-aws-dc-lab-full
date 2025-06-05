@@ -1,5 +1,10 @@
-# Configure WinRM and Firewall for Ansible on Windows Server
+<powershell>
 $ErrorActionPreference = "Stop"
+
+# --- Set custom Administrator password ---
+$AdminPassword = ConvertTo-SecureString "MyCustomP@ssw0rd!" -AsPlainText -Force
+Set-LocalUser -Name "Administrator" -Password $AdminPassword
+Set-LocalUser -Name "Administrator" -PasswordNeverExpires $true
 
 # --- Generate self-signed certificate for HTTPS WinRM ---
 $cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My
@@ -26,5 +31,6 @@ New-NetFirewallRule -DisplayName "WinRM HTTP"  -Direction Inbound -Action Allow 
 New-NetFirewallRule -DisplayName "WinRM HTTPS" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5986
 New-NetFirewallRule -DisplayName "RDP"         -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
 
-# --- Optional: Restart WinRM service for good measure ---
+# --- Optional: Restart WinRM service ---
 Restart-Service winrm -Force
+</powershell>

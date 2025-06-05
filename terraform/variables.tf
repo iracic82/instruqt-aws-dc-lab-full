@@ -17,3 +17,9 @@ variable "subnet_b_cidr" {
   type    = string
   default = "10.100.2.0/24"
 }
+
+variable "windows_admin_password" {
+  description = "Password for the Windows Administrator account"
+  type        = string
+  sensitive   = true
+}

@@ -140,7 +140,9 @@ resource "aws_instance" "dc1" {
   subnet_id              = aws_subnet.public_a.id
   key_name               = aws_key_pair.rdp.key_name
   vpc_security_group_ids = [aws_security_group.rdp_sg.id]
-  user_data              = file("./scripts/winrm-init.ps1")
+  user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
+    admin_password = var.windows_admin_password
+  })
   tags = {
     Name = "dc1"
   }
@@ -153,7 +155,9 @@ resource "aws_instance" "dc2" {
   subnet_id              = aws_subnet.public_b.id
   key_name               = aws_key_pair.rdp.key_name
   vpc_security_group_ids = [aws_security_group.rdp_sg.id]
-  user_data              = file("./scripts/winrm-init.ps1")
+  user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
+    admin_password = var.windows_admin_password
+  })
   tags = {
     Name = "dc2"
   }

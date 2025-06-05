@@ -4,11 +4,13 @@ import os
 import boto3
 import sys
 from datetime import datetime, timezone
+import re
 
 # ---------------------------
 # Setup logging
 # ---------------------------
 log_file = "dns_record_cleanup_log.txt"
+source_log_file = "dns_record_log.txt"
 timestamp = datetime.now(timezone.utc).isoformat()
 log_lines = [f"\n--- DNS Record Deletion Log [{timestamp}] ---\n"]
 
@@ -17,7 +19,7 @@ def log(message):
     log_lines.append(message + "\n")
 
 # ---------------------------
-# AWS credentials from env vars
+# AWS credentials from DEMO_ env vars
 # ---------------------------
 aws_access_key_id = os.getenv("DEMO_AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("DEMO_AWS_SECRET_ACCESS_KEY")
@@ -29,30 +31,28 @@ if not aws_access_key_id or not aws_secret_access_key or not hosted_zone_id:
     sys.exit(1)
 
 # ---------------------------
-# Participant + IPs from env
+# Parse records from dns_record_log.txt
 # ---------------------------
-participant_id = os.getenv("INSTRUQT_PARTICIPANT_ID")
-dc1_ip = os.getenv("DC1_IP")
-dc2_ip = os.getenv("DC2_IP")
-
-if not participant_id:
-    log("❌ ERROR: INSTRUQT_PARTICIPANT_ID is not set")
+if not os.path.exists(source_log_file):
+    log(f"❌ ERROR: {source_log_file} not found")
     sys.exit(1)
 
-if not dc1_ip or not dc2_ip:
-    log("❌ ERROR: DC1_IP and DC2_IP must both be set")
+records = {}
+
+with open(source_log_file, "r") as f:
+    for line in f:
+        match = re.search(r"A record.*: (.+?) -> ([\d.]+)", line)
+        if match:
+            fqdn = match.group(1).strip()
+            ip = match.group(2).strip()
+            records[fqdn] = ip
+
+if not records:
+    log("❌ ERROR: No valid A records found in log file.")
     sys.exit(1)
 
 # ---------------------------
-# FQDN mappings for deletion
-# ---------------------------
-records = {
-    f"{participant_id}-dc1.iracictechguru.com.": dc1_ip,
-    f"{participant_id}-dc2.iracictechguru.com.": dc2_ip,
-}
-
-# ---------------------------
-# Initialize boto3 session
+# Create boto3 session
 # ---------------------------
 session = boto3.Session(
     aws_access_key_id=aws_access_key_id,
@@ -63,7 +63,7 @@ session = boto3.Session(
 route53 = session.client("route53")
 
 # ---------------------------
-# Delete A records from Route 53
+# Delete each record
 # ---------------------------
 for fqdn, ip in records.items():
     log(f"🗑️  Deleting A record: {fqdn} -> {ip}")
@@ -85,17 +85,16 @@ for fqdn, ip in records.items():
                 ]
             }
         )
-        status = response['ChangeInfo']['Status']
         log(f"✅  Deleted: {fqdn} -> {ip}")
-        log(f"📡  Change status: {status}")
+        log(f"📡  Change status: {response['ChangeInfo']['Status']}")
     except route53.exceptions.InvalidChangeBatch as e:
-        log(f"⚠️  Record {fqdn} not found or already deleted: {e}")
+        log(f"⚠️  Record {fqdn} may not exist or already deleted: {e}")
     except Exception as e:
         log(f"❌ Failed to delete A record {fqdn}: {e}")
         sys.exit(1)
 
 # ---------------------------
-# Write log to file
+# Write cleanup log
 # ---------------------------
 with open(log_file, "a") as f:
     f.writelines(log_lines)

@@ -1,8 +1,8 @@
 <powershell>
 $ErrorActionPreference = "Stop"
 
-# --- Set custom Administrator password ---
-$AdminPassword = ConvertTo-SecureString "MyCustomP@ssw0rd!" -AsPlainText -Force
+# --- Set Administrator password ---
+$AdminPassword = ConvertTo-SecureString "${admin_password}" -AsPlainText -Force
 Set-LocalUser -Name "Administrator" -Password $AdminPassword
 Set-LocalUser -Name "Administrator" -PasswordNeverExpires $true
 
@@ -11,14 +11,12 @@ $cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation 
 $pwd = ConvertTo-SecureString -String "P@ssword123" -Force -AsPlainText
 Export-PfxCertificate -Cert $cert -FilePath "C:\winrm.pfx" -Password $pwd
 
-# --- Enable WinRM QuickConfig (HTTP, for lab/testing) ---
+# --- Enable WinRM QuickConfig (HTTP) ---
 winrm quickconfig -force
 
 # --- Set up WinRM HTTPS listener ---
 $thumbprint = $cert.Thumbprint
-# Remove default HTTPS listeners if any
 Get-ChildItem WSMan:\Localhost\Listener | Where-Object { $_.Keys -like '*Transport=HTTPS*' } | Remove-Item -Force
-# Create new HTTPS listener
 winrm create winrm/config/Listener?Address=*+Transport=HTTPS "@{Hostname=`"$env:COMPUTERNAME`"; CertificateThumbprint=`"$thumbprint`"}"
 
 # --- Allow Ansible connections ---
@@ -31,6 +29,5 @@ New-NetFirewallRule -DisplayName "WinRM HTTP"  -Direction Inbound -Action Allow 
 New-NetFirewallRule -DisplayName "WinRM HTTPS" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5986
 New-NetFirewallRule -DisplayName "RDP"         -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
 
-# --- Optional: Restart WinRM service ---
 Restart-Service winrm -Force
 </powershell>

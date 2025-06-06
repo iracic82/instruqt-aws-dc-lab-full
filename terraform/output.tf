@@ -1,8 +1,8 @@
 output "domain_controllers" {
   description = "Public IPs of the deployed Windows Server Domain Controllers (RDP enabled)"
   value = {
-    dc1 = aws_instance.dc1.public_ip
-    dc2 = aws_instance.dc2.public_ip
+    dc1 = aws_eip.dc1_eip.public_ip
+    dc2 = aws_eip.dc2_eip.public_ip
   }
 }
 
@@ -15,17 +15,17 @@ Download the private key from:
 Use the following commands (from your local machine):
 
   # For DC1
-  ssh -i ./instruqt-dc-key.pem Administrator@${aws_instance.dc1.public_ip}
+  ssh -i ./instruqt-dc-key.pem Administrator@${aws_eip.dc1_eip.public_ip}
 
   # For DC2
-  ssh -i ./instruqt-dc-key.pem Administrator@${aws_instance.dc2.public_ip}
+  ssh -i ./instruqt-dc-key.pem Administrator@${aws_eip.dc2_eip.public_ip}
 
 OR
 
   Open Windows Remote Desktop (mstsc.exe) and connect to:
-    ${aws_instance.dc1.public_ip}  or  ${aws_instance.dc2.public_ip}
+    ${aws_eip.dc1_eip.public_ip}  or  ${aws_eip.dc2_eip.public_ip}
 
   Username: Administrator
-  Password: (get from AWS Console: select instance → Connect → Get Password, using your private key)
+  Password: (retrieve from AWS Console → Connect → Get Password using your key)
 EOT
 }

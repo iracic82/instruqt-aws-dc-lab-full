@@ -4,72 +4,83 @@ Start-Transcript -Path "C:\user_data.log" -Append
 
 Write-Host "---- Starting Windows EC2 user_data ----"
 
-# --- Step 1: Wait for network stack to be ready ---
+# --- Wait for network stack to initialize ---
 Write-Host "Waiting for network..."
 Start-Sleep -Seconds 30
 
-# --- Step 2: Set Administrator password ---
+# --- Set Admin password ---
 Write-Host "Setting Administrator password..."
-$AdminPassword = ConvertTo-SecureString "${admin_password}" -AsPlainText -Force
-Set-LocalUser -Name "Administrator" -Password $AdminPassword
-Set-LocalUser -Name "Administrator" -PasswordNeverExpires $true
+try {
+    $AdminPassword = ConvertTo-SecureString "${admin_password}" -AsPlainText -Force
+    Set-LocalUser -Name "Administrator" -Password $AdminPassword
+    Set-LocalUser -Name "Administrator" -PasswordNeverExpires $true
+} catch {
+    Write-Host "❌ Failed to set admin password: $_"
+}
 
-# --- Step 3: Generate self-signed cert for HTTPS WinRM (optional fallback) ---
-Write-Host "Generating self-signed certificate..."
-$cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My
-$pwd = ConvertTo-SecureString -String "P@ssword123" -Force -AsPlainText
-Export-PfxCertificate -Cert $cert -FilePath "C:\winrm.pfx" -Password $pwd
+# --- Generate self-signed cert ---
+Write-Host "Generating self-signed cert..."
+try {
+    $cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My
+    $pwd = ConvertTo-SecureString -String "P@ssword123" -AsPlainText -Force
+    Export-PfxCertificate -Cert $cert -FilePath "C:\winrm.pfx" -Password $pwd
+} catch {
+    Write-Host "❌ Failed to create/export cert: $_"
+}
 
-# --- Step 4: Configure WinRM (HTTP & HTTPS listener) ---
+# --- Configure WinRM ---
 Write-Host "Configuring WinRM..."
 try {
     winrm quickconfig -force
     Set-Item -Path WSMan:\localhost\Service\Auth\Basic -Value $true
     Set-Item -Path WSMan:\localhost\Service\AllowUnencrypted -Value $true
-    Set-Item -Path WSMan:\localhost\Client\TrustedHosts -Value "*"
+    Set-Item -Path WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
 } catch {
-    Write-Host "WinRM setup failed: $_"
+    Write-Host "❌ WinRM setup failed: $_"
 }
 
-# --- Step 5: Set DNS client to internal DC1 IP ---
-Write-Host "Setting DNS to 10.100.1.100..."
+# --- Set DNS to DC1 ---
+Write-Host "Setting static DNS..."
 try {
-    $interface = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
-    Set-DnsClientServerAddress -InterfaceIndex $interface.InterfaceIndex -ServerAddresses ("10.100.1.100")
+    $adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1
+    Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses ("10.100.1.100")
 } catch {
-    Write-Host "DNS config failed: $_"
+    Write-Host "❌ DNS config failed: $_"
 }
 
-# --- Step 6: Create HTTPS listener manually ---
-Write-Host "Creating WinRM HTTPS listener..."
+# --- Setup HTTPS WinRM listener ---
+Write-Host "Creating HTTPS WinRM listener..."
 try {
-    $thumbprint = $cert.Thumbprint
+    $thumb = $cert.Thumbprint
     Get-ChildItem WSMan:\Localhost\Listener | Where-Object { $_.Keys -like '*Transport=HTTPS*' } | Remove-Item -Force -ErrorAction SilentlyContinue
-    winrm create winrm/config/Listener?Address=*+Transport=HTTPS "@{Hostname=`"$env:COMPUTERNAME`"; CertificateThumbprint=`"$thumbprint`"}"
+    winrm create winrm/config/Listener?Address=*+Transport=HTTPS "@{Hostname=`"$env:COMPUTERNAME`"; CertificateThumbprint=`"$thumb`"}"
 } catch {
-    Write-Host "HTTPS Listener creation failed: $_"
+    Write-Host "❌ HTTPS listener creation failed: $_"
 }
 
-# --- Step 7: Open required firewall ports ---
+# --- Open Firewall Ports ---
 Write-Host "Creating firewall rules..."
-$firewallRules = @(
+$ports = @(
     @{ Name = "WinRM HTTP";  Port = 5985 },
     @{ Name = "WinRM HTTPS"; Port = 5986 },
     @{ Name = "RDP";         Port = 3389 }
 )
-
-foreach ($rule in $firewallRules) {
+foreach ($rule in $ports) {
     try {
-        New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $rule.Port -ErrorAction Stop
+        New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $rule.Port
     } catch {
-        Write-Host "Firewall rule '$($rule.Name)' failed: $_"
+        Write-Host "❌ Failed to create firewall rule for $($rule.Port): $_"
     }
 }
 
-# --- Step 8: Restart WinRM ---
-Write-Host "Restarting WinRM service..."
-Restart-Service winrm -Force
+# --- Restart WinRM ---
+Write-Host "Restarting WinRM..."
+try {
+    Restart-Service winrm -Force
+} catch {
+    Write-Host "❌ WinRM restart failed: $_"
+}
 
-Write-Host "---- Finished Windows EC2 user_data ----"
+Write-Host "✅ Finished user_data setup"
 Stop-Transcript
 </powershell>

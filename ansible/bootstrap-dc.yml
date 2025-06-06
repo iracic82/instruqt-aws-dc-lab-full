@@ -58,6 +58,14 @@
         } until ($found -or $attempts -ge 12)
       when: inventory_hostname == "dc2"
 
+    - name: Wait for DC1 LDAP port from DC2
+      win_shell: |
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $result = $tcpClient.BeginConnect("10.100.1.100", 389, $null, $null)
+        $wait = $result.AsyncWaitHandle.WaitOne(300000)  # 5 min timeout
+        if (-not $wait) { throw "Timeout waiting for port 389" }
+      when: inventory_hostname == "dc2"
+
     - name: Join second server to existing domain
       win_domain_membership:
         dns_domain_name: "{{ domain_name }}"

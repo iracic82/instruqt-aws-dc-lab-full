@@ -2,14 +2,13 @@
 - name: Promote and configure Domain Controllers
   hosts: windows
   gather_facts: no
+
   vars:
     domain_name: corp.infolab
-    safe_mode_password: "{{ ansible_password }}"
-    domain_admin_password: "{{ ansible_password }}"  # for dc2 task
+    domain_admin_password: "{{ ansible_password }}"
 
   tasks:
-
-    - name: Ensure DNS client points to DC1
+    - name: Set DNS to DC1
       win_dns_client:
         adapter_names: '*'
         ipv4_addresses:
@@ -27,17 +26,37 @@
     - name: Promote first server as new forest root domain
       win_domain:
         dns_domain_name: "{{ domain_name }}"
-        safe_mode_password: "{{ safe_mode_password }}"
+        safe_mode_password: "{{ ansible_password }}"
         domain_admin_user: "{{ ansible_user }}"
         domain_admin_password: "{{ ansible_password }}"
       when: inventory_hostname == "dc1"
 
-    - name: Configure DNS forwarders (for public DNS resolution from clients)
-      win_dns_server_forwarder:
-        ip_addresses:
-          - 8.8.8.8
-          - 1.1.1.1
+    - name: Set DNS forwarders (Google + Cloudflare)
+      win_shell: |
+        Add-DnsServerForwarder -IPAddress 8.8.8.8,1.1.1.1
       when: inventory_hostname == "dc1"
+
+    - name: Reboot DC1 after promotion
+      win_reboot:
+        msg: "Rebooting DC1 after domain promotion"
+        pre_reboot_delay: 15
+      when: inventory_hostname == "dc1"
+
+    - name: Wait for DC1 DNS to resolve domain
+      win_shell: |
+        $attempts = 0
+        do {
+          try {
+            Resolve-DnsName -Name "{{ domain_name }}" -ErrorAction Stop
+            Write-Host "✅ Domain resolved"
+            $found = $true
+          } catch {
+            Write-Host "❌ Domain not found, retrying..."
+            Start-Sleep -Seconds 10
+            $attempts++
+          }
+        } until ($found -or $attempts -ge 12)
+      when: inventory_hostname == "dc2"
 
     - name: Join second server to existing domain
       win_domain_membership:
@@ -47,7 +66,8 @@
         state: domain
       when: inventory_hostname == "dc2"
 
-    - name: Reboot after promotion or domain join
+    - name: Reboot DC2 after join
       win_reboot:
-        msg: "Rebooting to complete domain configuration"
+        msg: "Rebooting DC2 after domain join"
         pre_reboot_delay: 10
+      when: inventory_hostname == "dc2"

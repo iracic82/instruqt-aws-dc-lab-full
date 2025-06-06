@@ -1,0 +1,4 @@
+collections:
+  - name: ansible.windows
+    source: https://github.com/ansible-collections/ansible.windows.git
+    version: 1.12.0

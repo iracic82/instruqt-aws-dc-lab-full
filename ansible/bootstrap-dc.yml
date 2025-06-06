@@ -1,8 +1,20 @@
+---
 - name: Promote and configure Domain Controllers
   hosts: windows
   gather_facts: no
+  vars:
+    domain_name: corp.infolab
+    safe_mode_password: "{{ ansible_password }}"
+    domain_admin_password: "{{ ansible_password }}"  # for dc2 task
 
   tasks:
+
+    - name: Ensure DNS client points to DC1
+      win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses:
+          - 10.100.1.100
+
     - name: Install AD, DNS, DHCP roles
       win_feature:
         name:
@@ -14,21 +26,28 @@
 
     - name: Promote first server as new forest root domain
       win_domain:
-        dns_domain_name: corp.infolab
-        safe_mode_password: "{{ ansible_password }}"
+        dns_domain_name: "{{ domain_name }}"
+        safe_mode_password: "{{ safe_mode_password }}"
         domain_admin_user: "{{ ansible_user }}"
         domain_admin_password: "{{ ansible_password }}"
       when: inventory_hostname == "dc1"
 
+    - name: Configure DNS forwarders (for public DNS resolution from clients)
+      win_dns_server_forwarder:
+        ip_addresses:
+          - 8.8.8.8
+          - 1.1.1.1
+      when: inventory_hostname == "dc1"
+
     - name: Join second server to existing domain
       win_domain_membership:
-        dns_domain_name: corp.infolab
-        domain_admin_user: "corp.infolab\\Administrator"
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ domain_name }}\\Administrator"
         domain_admin_password: "{{ domain_admin_password }}"
         state: domain
       when: inventory_hostname == "dc2"
 
-    - name: Reboot after promotion
+    - name: Reboot after promotion or domain join
       win_reboot:
         msg: "Rebooting to complete domain configuration"
         pre_reboot_delay: 10

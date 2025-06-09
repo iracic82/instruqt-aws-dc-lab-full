@@ -31,7 +31,7 @@ resource "aws_subnet" "public_b" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.subnet_b_cidr
   map_public_ip_on_launch = true
-  availability_zone       = data.aws_availability_zones.available.names[1]
+  availability_zone       = data.aws_availability_zones.available.names[0]
 
   tags = {
     Name = "Mgmt-subnet"

@@ -105,6 +105,8 @@ resource "aws_security_group" "rdp_sg" {
     for_each = toset([
       { from = 53, to = 53, protocol = "tcp" },
       { from = 53, to = 53, protocol = "udp" },
+      { from = 22, to = 22, protocol = "tcp" },
+      { from = 443, to = 443, protocol = "tcp" },
       { from = 88, to = 88, protocol = "tcp" },
       { from = 88, to = 88, protocol = "udp" },
       { from = 135, to = 135, protocol = "tcp" },

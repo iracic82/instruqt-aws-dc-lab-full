@@ -75,9 +75,8 @@ resource "aws_eip" "gm_eip" {
 
 resource "aws_eip_association" "gm_eip_assoc" {
   provider               = aws.eu-central-1
-  network_interface_id   = aws_network_interface.gm_mgmt.id
+  network_interface_id   = aws_network_interface.gm_lan1.id
   allocation_id          = aws_eip.gm_eip.id
-  private_ip_address     = "10.100.1.10"  # 👈 explicitly bind to mgmt IP
 }
 
 # --- GMC Network Interfaces ---
@@ -158,7 +157,6 @@ resource "aws_eip" "gmc_eip" {
 
 resource "aws_eip_association" "gmc_eip_assoc" {
   provider               = aws.eu-central-1
-  network_interface_id   = aws_network_interface.gmc_mgmt.id
+  network_interface_id   = aws_network_interface.gmc_lan1.id
   allocation_id          = aws_eip.gmc_eip.id
-  private_ip_address     = "10.100.1.20"
 }

@@ -3,6 +3,17 @@ data "aws_availability_zones" "available" {
   state    = "available"
 }
 
+data "aws_ami" "windows" {
+  provider    = aws.eu-central-1
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["Windows_Server-2025-English-Full-Base-*"]
+  }
+}
+
 resource "aws_vpc" "main" {
   provider             = aws.eu-central-1
   cidr_block           = var.vpc_cidr
@@ -62,14 +73,14 @@ resource "aws_route_table" "public_rt" {
 }
 
 resource "aws_route_table_association" "public_a" {
-  provider      = aws.eu-central-1
-  subnet_id     = aws_subnet.public_a.id
+  provider       = aws.eu-central-1
+  subnet_id      = aws_subnet.public_a.id
   route_table_id = aws_route_table.public_rt.id
 }
 
 resource "aws_route_table_association" "public_b" {
-  provider      = aws.eu-central-1
-  subnet_id     = aws_subnet.public_b.id
+  provider       = aws.eu-central-1
+  subnet_id      = aws_subnet.public_b.id
   route_table_id = aws_route_table.public_rt.id
 }
 
@@ -112,7 +123,6 @@ resource "aws_security_group" "rdp_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # AD required ports (internal only)
   dynamic "ingress" {
     for_each = toset([
       { from = 53, to = 53, protocol = "tcp" },
@@ -167,17 +177,6 @@ resource "local_sensitive_file" "private_key" {
   file_permission = "0400"
 }
 
-data "aws_ami" "windows" {
-  provider    = aws.eu-central-1
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["Windows_Server-2025-English-Full-Base-*"]
-  }
-}
-
 resource "aws_eip" "dc1_eip" {
   provider = aws.eu-central-1
   vpc      = true
@@ -196,15 +195,35 @@ resource "aws_eip" "dc2_eip" {
   }
 }
 
+resource "aws_network_interface" "dc1_eni" {
+  subnet_id       = aws_subnet.public_a.id
+  private_ips     = ["10.100.1.100"]
+  security_groups = [aws_security_group.rdp_sg.id]
+
+  tags = {
+    Name = "dc1-eni"
+  }
+}
+
+resource "aws_network_interface" "dc2_eni" {
+  subnet_id       = aws_subnet.public_b.id
+  private_ips     = ["10.100.2.100"]
+  security_groups = [aws_security_group.rdp_sg.id]
+
+  tags = {
+    Name = "dc2-eni"
+  }
+}
+
 resource "aws_instance" "dc1" {
-  provider                  = aws.eu-central-1
-  ami                       = data.aws_ami.windows.id
-  instance_type             = "t3.medium"
-  subnet_id                 = aws_subnet.public_a.id
-  key_name                  = aws_key_pair.rdp.key_name
-  vpc_security_group_ids    = [aws_security_group.rdp_sg.id]
-  private_ip                = "10.100.1.100"
-  associate_public_ip_address = false
+  ami           = data.aws_ami.windows.id
+  instance_type = "t3.medium"
+  key_name      = aws_key_pair.rdp.key_name
+
+  network_interface {
+    network_interface_id = aws_network_interface.dc1_eni.id
+    device_index         = 0
+  }
 
   user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
     admin_password = var.windows_admin_password
@@ -218,14 +237,14 @@ resource "aws_instance" "dc1" {
 }
 
 resource "aws_instance" "dc2" {
-  provider                  = aws.eu-central-1
-  ami                       = data.aws_ami.windows.id
-  instance_type             = "t3.medium"
-  subnet_id                 = aws_subnet.public_b.id
-  key_name                  = aws_key_pair.rdp.key_name
-  vpc_security_group_ids    = [aws_security_group.rdp_sg.id]
-  private_ip                = "10.100.2.100"
-  associate_public_ip_address = false
+  ami           = data.aws_ami.windows.id
+  instance_type = "t3.medium"
+  key_name      = aws_key_pair.rdp.key_name
+
+  network_interface {
+    network_interface_id = aws_network_interface.dc2_eni.id
+    device_index         = 0
+  }
 
   user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
     admin_password = var.windows_admin_password
@@ -239,13 +258,13 @@ resource "aws_instance" "dc2" {
 }
 
 resource "aws_eip_association" "dc1_assoc" {
-  provider      = aws.eu-central-1
-  instance_id   = aws_instance.dc1.id
-  allocation_id = aws_eip.dc1_eip.id
+  network_interface_id = aws_network_interface.dc1_eni.id
+  allocation_id        = aws_eip.dc1_eip.id
+  private_ip_address   = "10.100.1.100"
 }
 
 resource "aws_eip_association" "dc2_assoc" {
-  provider      = aws.eu-central-1
-  instance_id   = aws_instance.dc2.id
-  allocation_id = aws_eip.dc2_eip.id
+  network_interface_id = aws_network_interface.dc2_eni.id
+  allocation_id        = aws_eip.dc2_eip.id
+  private_ip_address   = "10.100.2.100"
 }

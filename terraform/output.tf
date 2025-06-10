@@ -49,7 +49,7 @@ Grid Member Candidate (GMC):
 
 Default UI login:
   Username: admin
-  Password: (value of var.infoblox_admin_password)
+  Password: Proba123!
 EOT
 }
 

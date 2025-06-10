@@ -121,13 +121,7 @@ resource "aws_instance" "gmc" {
 
   user_data = <<-EOF
 #infoblox-config
-gridmaster:
-ip_addr: 10.100.1.10
-netmask: 255.255.255.0
-gateway: 10.100.1.1
-hostname: GM-AWS
-domain_name: gm.aws.lab
-temp_license: vnios dns dhcp enterprise cloud
+temp_license: nios IB-V825 enterprise dns dhcp cloud
 remote_console_enabled: y
 default_admin_password: "Proba123!"
 

@@ -100,6 +100,7 @@ with open(CLOUD_INIT_FILE, "w") as f:
     f.write("#infoblox-config\n")
     f.write("temp_license: nios IB-V926 enterprise dns dhcp\n")
     f.write("remote_console_enabled: y\n")
+    f.write('default_admin_password: "Proba123!"\n')
     f.write("lan1:\n")
     f.write(f"  v4_addr: {MEMBER_IP}\n")
     f.write(f"  v4_netmask: {SUBNET_MASK}\n")

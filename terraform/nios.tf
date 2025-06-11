@@ -119,21 +119,7 @@ resource "aws_instance" "gmc" {
     device_index         = 1
   }
 
-  user_data = <<-EOF
-#infoblox-config
-temp_license: nios IB-V825 enterprise dns dhcp cloud
-remote_console_enabled: y
-default_admin_password: "Proba123!"
-
-lan1:
-ip_addr: 10.100.2.11
-netmask: 255.255.255.0
-
-mgmt:
-ip_addr: 10.100.1.10
-netmask: 255.255.255.0
-gateway: 10.100.1.1
-EOF
+  user_data = file("./scripts/cloud-init.yaml")
 
   tags = {
     Name = "Infoblox-GMC"

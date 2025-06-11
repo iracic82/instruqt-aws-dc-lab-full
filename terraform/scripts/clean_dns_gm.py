@@ -5,9 +5,6 @@ import boto3
 import sys
 from datetime import datetime
 
-# ---------------------------
-# Setup logging
-# ---------------------------
 log_file = "dns_log_gm_cleanup.txt"
 timestamp = datetime.utcnow().isoformat()
 log_lines = [f"\n--- DNS Record Cleanup Log [{timestamp}] ---\n"]
@@ -16,65 +13,77 @@ def log(msg):
     print(msg)
     log_lines.append(msg + "\n")
 
-# ---------------------------
-# Required ENV
-# ---------------------------
+# --- ENV ---
 aws_access_key_id = os.getenv("DEMO_AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("DEMO_AWS_SECRET_ACCESS_KEY")
 region = os.getenv("DEMO_AWS_REGION", "us-east-1")
 hosted_zone_id = os.getenv("DEMO_HOSTED_ZONE_ID")
 gm_ip = os.getenv("GM_IP")
+prefix = os.getenv("INSTRUQT_PARTICIPANT_ID", "").strip()
 
 if not aws_access_key_id or not aws_secret_access_key or not hosted_zone_id:
-    log("❌ ERROR: Missing AWS credentials or Hosted Zone ID")
+    log("❌ Missing AWS credentials or Hosted Zone ID")
     sys.exit(1)
 
 if not gm_ip:
-    log("❌ ERROR: GM_IP environment variable not set")
+    log("❌ GM_IP not set in environment")
     sys.exit(1)
 
-fqdn = "infoblox.iracictechguru.com."
+fqdn = f"{prefix + '-' if prefix else ''}infoblox.iracictechguru.com."
 
-# ---------------------------
-# Delete A record from Route 53
-# ---------------------------
-log(f"🧹 Deleting A record: {fqdn} -> {gm_ip}")
+# --- Boto3 session ---
+session = boto3.Session(
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key,
+    region_name=region
+)
+route53 = session.client("route53")
+
+# --- Lookup existing record ---
 try:
-    session = boto3.Session(
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key,
-        region_name=region
+    response = route53.list_resource_record_sets(
+        HostedZoneId=hosted_zone_id,
+        StartRecordName=fqdn,
+        StartRecordType="A",
+        MaxItems="1"
     )
-    route53 = session.client("route53")
+    records = response["ResourceRecordSets"]
+    if not records or records[0]["Name"] != fqdn:
+        log(f"❌ No matching A record found for {fqdn}")
+        sys.exit(1)
+
+    record = records[0]
+    ttl = record["TTL"]
+    values = record["ResourceRecords"]
+
+    log(f"➡️  Deleting A record: {fqdn} with TTL {ttl} and value(s): {[v['Value'] for v in values]}")
 
     route53.change_resource_record_sets(
         HostedZoneId=hosted_zone_id,
         ChangeBatch={
-            "Comment": "Delete A record for Infoblox GM",
+            "Comment": f"Delete A record for {fqdn}",
             "Changes": [
                 {
                     "Action": "DELETE",
                     "ResourceRecordSet": {
                         "Name": fqdn,
                         "Type": "A",
-                        "TTL": 300,
-                        "ResourceRecords": [{"Value": gm_ip}]
+                        "TTL": ttl,
+                        "ResourceRecords": values
                     }
                 }
             ]
         }
     )
 
-    log(f"✅ Deleted A record: {fqdn} -> {gm_ip}")
+    log(f"✅ Successfully deleted: {fqdn}")
 
 except Exception as e:
-    log(f"❌ ERROR: Failed to delete A record: {e}")
+    log(f"❌ ERROR: {e}")
     sys.exit(1)
 
-# ---------------------------
-# Write log to file
-# ---------------------------
+# --- Write log ---
 with open(log_file, "a") as f:
     f.writelines(log_lines)
 
-log(f"📄 Cleanup log written to {log_file}")
+log(f"📄 Log written to {log_file}")

@@ -3,7 +3,8 @@ import os
 from urllib.parse import urlparse
 
 # ==== CONFIG ====
-GM_IP = "infoblox.iracictechguru.com"  # Replace with real IP
+participant_id = os.getenv("INSTRUQT_PARTICIPANT_ID")
+GM_IP = f"{participant_id + '-' if participant_id else ''}infoblox.iracictechguru.com"  # Replace with real IP
 USERNAME = "admin"
 PASSWORD = "Proba123!"
 WAPI_VERSION = "v2.11"
@@ -11,7 +12,7 @@ MEMBER_HOSTNAME = "nios-member1.iracictechguru.com"
 MEMBER_IP = "10.100.2.21"
 SUBNET_MASK = "255.255.255.0"
 GATEWAY = "10.100.2.1"
-GRID_MASTER_HOSTNAME = "infoblox.iracictechguru.com"
+GRID_MASTER_HOSTNAME = GM_IP
 CLOUD_INIT_FILE = "./cloud-init.yaml"
 
 session = requests.Session()

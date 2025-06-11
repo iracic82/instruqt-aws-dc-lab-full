@@ -49,6 +49,16 @@ export DC2_IP
 echo "export DC1_IP=${DC1_IP}" >> /root/.bashrc
 echo "export DC2_IP=${DC2_IP}" >> /root/.bashrc
 
+# --- New: Fetch GM IP from Terraform output ---
+# Extract GM IP (only the line with "gm")
+GM_IP=$(terraform output infoblox_vnios_public_ips | grep '"gm"' | awk -F '"' '{print $4}')
+
+# Export to current session
+export GM_IP
+
+# Persist to .bashrc
+echo "export GM_IP=${GM_IP}" >> /root/.bashrc
+
 
 # Get Instance IDs
 DC1_ID=$(aws ec2 describe-instances --region $AWS_REGION --filters "Name=ip-address,Values=${DC1_IP}" --query "Reservations[].Instances[].InstanceId" --output text)
@@ -201,6 +211,8 @@ echo "Guacamole user-mapping.xml created successfully."
 # Run Python scripts
 cd /root/infoblox-lab/instruqt-aws-dc-lab-full/terraform/scripts
 python3 setup_dns.py
+sleep 10
+python3 create_dns_gm.py
 sleep 10
 
 

@@ -3,7 +3,7 @@ import os
 from urllib.parse import urlparse
 
 # ==== CONFIG ====
-GM_IP = "3.65.87.230"  # Replace with real IP
+GM_IP = "infoblox.iracictechguru.com"  # Replace with real IP
 USERNAME = "admin"
 PASSWORD = "Proba123!"
 WAPI_VERSION = "v2.11"

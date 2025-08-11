@@ -41,6 +41,24 @@
         timeout: 900
       when: inventory_hostname == "dc1"
 
+    - name: Wait for NetLogon/SYSVOL to be advertised (DC1)
+      ansible.windows.win_shell: |
+        nltest /dsgetdc:{{ domain_name }}
+      register: dc1_adv
+      retries: 20
+      delay: 15
+      until: dc1_adv.rc == 0
+      when: inventory_hostname == "dc1"
+
+    - name: Wait for SYSVOL share to exist (DC1)
+      ansible.windows.win_shell: |
+        if (Test-Path \\localhost\SYSVOL) { exit 0 } else { exit 1 }
+      register: sysvol1
+      retries: 20
+      delay: 15
+      until: sysvol1.rc == 0
+      when: inventory_hostname == "dc1"
+
     - name: Configure DNS forwarders on DC1 (authoritative set)
       ansible.windows.win_shell: |
         Import-Module DnsServer
@@ -50,6 +68,7 @@
         Set-DnsServerForwarder -IPAddress {{ dns_forwarders | join(',') }} -UseRootHint $false
         }
         Get-DnsServerForwarder | Format-List | Out-String
+      when: inventory_hostname == "dc1"
       tags: [dns_forwarders]
 
     # --------------------------------
@@ -96,6 +115,23 @@
         timeout: 900
       when: inventory_hostname == "dc2"
     
+    - name: Wait for NetLogon/SYSVOL to be advertised (DC2)
+      ansible.windows.win_shell: nltest /dsgetdc:{{ domain_name }}
+      register: dc2_adv
+      retries: 20
+      delay: 15
+      until: dc2_adv.rc == 0
+      when: inventory_hostname == "dc2"
+
+    - name: Wait for SYSVOL share to exist (DC2)
+      ansible.windows.win_shell: |
+        if (Test-Path \\localhost\SYSVOL) { exit 0 } else { exit 1 }
+      register: sysvol2
+      retries: 20
+      delay: 15
+      until: sysvol2.rc == 0
+      when: inventory_hostname == "dc2"
+    
     - name: Configure DNS forwarders (authoritative set)
       ansible.windows.win_shell: |
         Import-Module DnsServer
@@ -108,6 +144,21 @@
         Get-DnsServerForwarder | Format-List | Out-String
       when: inventory_hostname == "dc2"
       tags: [dns_forwarders]
+    
+    # --------------------------------
+    # Extra safeguard: Wait for replication before DNS import
+    # --------------------------------
+    - name: Wait until key zone exists on BOTH DCs before import
+      ansible.windows.win_shell: |
+        try {
+          $zone = Get-DnsServerZone -Name "{{ domain_name }}" -ErrorAction Stop
+          if ($zone) { exit 0 } else { exit 1 }
+        } catch { exit 1 }
+      register: zone_ready
+      retries: 20
+      delay: 15
+      until: zone_ready.rc == 0
+      when: inventory_hostname == "dc1"
 
     # --------------------------------
     # DC1: Stage & run DNS import (tagged)
@@ -145,18 +196,35 @@
       when: inventory_hostname == "dc1"
       tags: [dns_import]
 
-    - name: Run DNS import exactly once on DC1
+    - name: Run DNS import exactly once on DC1 (fail on real errors)
       ansible.windows.win_shell: |
+        $ErrorActionPreference='Stop'
         Set-Location {{ dns_import_dir }}
         if (!(Test-Path .\import.done)) {
-          powershell.exe -ExecutionPolicy Bypass -File .\dns_restore_3.ps1
+          $out = powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\dns_restore_3.ps1 2>&1
+          $out | Out-String
           New-Item -ItemType File .\import.done | Out-Null
-        }
+        } else { 'import.done present; skipping' }
       args:
         chdir: "{{ dns_import_dir }}"
+      register: import_run
       when: inventory_hostname == "dc1"
+      changed_when: "'skipping' not in (import_run.stdout | default(''))"
+      failed_when: >
+        import_run.rc != 0 or
+        (
+            (import_run.stdout | default('')) is string and
+            ('Command failed' in import_run.stdout) and
+            (' 9711 ' not in import_run.stdout)
+        )
       tags: [dns_import]
 
+    - name: Confirm key zone exists on DC1
+      ansible.windows.win_shell: "(Get-DnsServerZone -Name 'blox.corp' -ErrorAction Stop) | Out-String"
+      register: zone_check
+      when: inventory_hostname == "dc1"
+      changed_when: false
+      tags: [dns_import]
     # --------------------------------
     # Final DNS client settings on DC1/DC2
     # --------------------------------

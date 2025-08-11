@@ -1,0 +1,44 @@
+;
+;  Database file (null) for Default zone scope in zone bloxdev-test.corp.
+;      Zone version:  25
+;
+
+@                       IN  SOA dc1.blox.corp. hostmaster.blox.corp. (
+                        		25           ; serial number
+                        		900          ; refresh
+                        		600          ; retry
+                        		86400        ; expire
+                        		3600       ) ; default TTL
+
+;
+;  Zone NS records
+;
+
+@                       NS	dc1.blox.corp.
+@                       NS	dc2.blox.corp.
+
+;
+;  Zone records
+;
+
+@                       600	A	10.204.22.39
+39fe9fee-d06c-44e1-9311-f28622741f3c._msdcs 600	CNAME	srs509.bloxdev-test.corp.
+_kerberos._tcp.default-first-site-name._sites.dc._msdcs 600	SRV	0 100 88	srs509.bloxdev-test.corp.
+_ldap._tcp.default-first-site-name._sites.dc._msdcs 600	SRV	0 100 389	srs509.bloxdev-test.corp.
+_kerberos._tcp.dc._msdcs 600	SRV	0 100 88	srs509.bloxdev-test.corp.
+_ldap._tcp.dc._msdcs    600	SRV	0 100 389	srs509.bloxdev-test.corp.
+_ldap._tcp.16fd2d5a-ccfc-4c69-89ba-be599ced0dd1.domains._msdcs 600	SRV	0 100 389	srs509.bloxdev-test.corp.
+gc._msdcs               600	A	10.204.22.39
+_ldap._tcp.default-first-site-name._sites.gc._msdcs 600	SRV	0 100 3268	srs509.bloxdev-test.corp.
+_ldap._tcp.gc._msdcs    600	SRV	0 100 3268	srs509.bloxdev-test.corp.
+_ldap._tcp.pdc._msdcs   600	SRV	0 100 389	srs509.bloxdev-test.corp.
+_gc._tcp.default-first-site-name._sites 600	SRV	0 100 3268	srs509.bloxdev-test.corp.
+_kerberos._tcp.default-first-site-name._sites 600	SRV	0 100 88	srs509.bloxdev-test.corp.
+_ldap._tcp.default-first-site-name._sites 600	SRV	0 100 389	srs509.bloxdev-test.corp.
+_gc._tcp                600	SRV	0 100 3268	srs509.bloxdev-test.corp.
+_kerberos._tcp          600	SRV	0 100 88	srs509.bloxdev-test.corp.
+_kpasswd._tcp           600	SRV	0 100 464	srs509.bloxdev-test.corp.
+_ldap._tcp              600	SRV	0 100 389	srs509.bloxdev-test.corp.
+_kerberos._udp          600	SRV	0 100 88	srs509.bloxdev-test.corp.
+_kpasswd._udp           600	SRV	0 100 464	srs509.bloxdev-test.corp.
+srs509                  1200	A	10.204.22.39

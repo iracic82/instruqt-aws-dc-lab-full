@@ -1,0 +1,23 @@
+;
+;  Database file (null) for Default zone scope in zone mgt.chicago.blox.corp.
+;      Zone version:  3
+;
+
+@                       IN  SOA dc1.blox.corp. hostmaster.blox.corp. (
+                        		3            ; serial number
+                        		900          ; refresh
+                        		600          ; retry
+                        		86400        ; expire
+                        		3600       ) ; default TTL
+
+;
+;  Zone NS records
+;
+
+@                       NS	dc2.blox.corp.
+@                       NS	dc1.blox.corp.
+
+;
+;  Zone records
+;
+

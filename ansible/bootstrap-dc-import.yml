@@ -1,0 +1,168 @@
+- name: Build AD forest, add 2nd DC, and import DNS zones/records (microsoft.ad)
+  hosts: windows
+  gather_facts: no
+
+  vars:
+    domain_name: corp.infolab
+    domain_netbios: CORP
+    domain_admin_password: "{{ ansible_password }}"
+
+    dc1_ip: 10.100.1.100
+    dc2_ip: 10.100.1.101
+
+    dns_forwarders: [8.8.8.8, 1.1.1.1]
+    dns_import_dir: 'C:\dns-import'
+
+  tasks:
+    - name: Set DNS client on both nodes to DC1 initially
+      ansible.windows.win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses: ["{{ dc1_ip }}"]
+
+    - name: Install ADDS, DNS, DHCP roles + tools
+      ansible.windows.win_feature:
+        name: [AD-Domain-Services, DNS, DHCP]
+        state: present
+        include_management_tools: yes
+
+    # -----------------------------
+    # DC1: Create forest root domain
+    # -----------------------------
+    - name: Promote DC1 as forest root (creates AD-integrated DNS for {{ domain_name }})
+      microsoft.ad.domain:
+        dns_domain_name: "{{ domain_name }}"
+        safe_mode_password: "{{ ansible_password }}"
+        install_dns: true
+        reboot: true
+      when: inventory_hostname == "dc1"
+
+    - name: Wait for DC1 to come back after forest promotion
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+      when: inventory_hostname == "dc1"
+
+    - name: Configure DNS forwarders on DC1 (authoritative set)
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $current = (Get-DnsServerForwarder).IPAddress.IPAddressToString
+        $desired = @({{ dns_forwarders | map('quote') | join(', ') }})
+        if (-not (@($current) -ceq @($desired))) {
+        Set-DnsServerForwarder -IPAddress {{ dns_forwarders | join(',') }} -UseRootHint $false
+        }
+        Get-DnsServerForwarder | Format-List | Out-String
+      tags: [dns_forwarders]
+
+    # --------------------------------
+    # DC2: Join domain & promote to DC
+    # --------------------------------
+    - name: From DC2, wait for LDAP 389 on DC1
+      ansible.windows.win_shell: |
+        $tcp = New-Object Net.Sockets.TcpClient
+        $res = $tcp.BeginConnect("{{ dc1_ip }}",389,$null,$null)
+        if (-not $res.AsyncWaitHandle.WaitOne(300000)) { throw "Timeout waiting for 389 on DC1" }
+      when: inventory_hostname == "dc2"
+
+    - name: Join DC2 to the domain
+      microsoft.ad.membership:
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ domain_netbios }}\\Administrator"
+        domain_admin_password: "{{ domain_admin_password }}"
+        state: domain
+      when: inventory_hostname == "dc2"
+
+    - name: Reboot DC2 after domain join
+      ansible.windows.win_reboot:
+        pre_reboot_delay: 10
+      when: inventory_hostname == "dc2"
+
+    - name: Wait for DC2 after join
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+      when: inventory_hostname == "dc2"
+
+    - name: Promote DC2 to additional domain controller with DNS
+      microsoft.ad.domain_controller:
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ domain_netbios }}\\Administrator"
+        domain_admin_password: "{{ domain_admin_password }}"
+        safe_mode_password: "{{ ansible_password }}"
+        install_dns: yes
+        state: domain_controller
+        reboot: true
+      when: inventory_hostname == "dc2"
+
+    - name: Wait for DC2 after DC promotion
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+      when: inventory_hostname == "dc2"
+    
+    - name: Configure DNS forwarders (authoritative set)
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $desired = @({{ dns_forwarders | map('quote') | join(', ') }})
+        $cur = (Get-DnsServerForwarder -ErrorAction SilentlyContinue).IPAddress.IPAddressToString
+        if (-not $cur) { $cur = @() }
+        if (-not (@($cur) -ceq @($desired))) {
+          Set-DnsServerForwarder -IPAddress {{ dns_forwarders | join(',') }} -UseRootHint $false
+        }
+        Get-DnsServerForwarder | Format-List | Out-String
+      when: inventory_hostname == "dc2"
+      tags: [dns_forwarders]
+
+    # --------------------------------
+    # DC1: Stage & run DNS import (tagged)
+    # --------------------------------
+    - name: Create import directory on DC1
+      ansible.windows.win_file:
+        path: "{{ dns_import_dir }}"
+        state: directory
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Copy DNS restore script and zone list to DC1
+      ansible.windows.win_copy:
+        src: "{{ item }}"
+        dest: "{{ dns_import_dir }}\\"
+      loop:
+        - files/dns_restore_3.ps1
+        - files/zone_list.txt
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Copy all zone files (*.dns) to DC1
+      ansible.windows.win_copy:
+        src: "files/zones/"
+        dest: "{{ dns_import_dir }}\\"
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Validate DNS import (DryRun) on DC1
+      ansible.windows.win_shell: |
+        Set-Location {{ dns_import_dir }}
+        powershell.exe -ExecutionPolicy Bypass -File .\dns_restore_3.ps1 -DryRun
+      args:
+        chdir: "{{ dns_import_dir }}"
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Run DNS import exactly once on DC1
+      ansible.windows.win_shell: |
+        Set-Location {{ dns_import_dir }}
+        if (!(Test-Path .\import.done)) {
+          powershell.exe -ExecutionPolicy Bypass -File .\dns_restore_3.ps1
+          New-Item -ItemType File .\import.done | Out-Null
+        }
+      args:
+        chdir: "{{ dns_import_dir }}"
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    # --------------------------------
+    # Final DNS client settings on DC1/DC2
+    # --------------------------------
+    - name: Update DNS client on DC1/2 to use itself first, then peer
+      ansible.windows.win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses:
+          - "{{ dc1_ip if inventory_hostname == 'dc1' else dc2_ip }}"
+          - "{{ dc2_ip if inventory_hostname == 'dc1' else dc1_ip }}"

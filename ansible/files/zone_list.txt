@@ -1,0 +1,9 @@
+blox.corp
+mgt.chicago.blox.corp
+mgt.dallas.blox.corp
+mgt.miami.blox.corp
+mgt.sjc.blox.corp
+voip.blox.corp
+wl.blox.corp
+ws.blox.corp
+bloxdev-test.corp

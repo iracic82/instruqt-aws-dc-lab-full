@@ -71,17 +71,32 @@ user_payload = {
 print(f"📤 Creating user '{USER_NAME}'...")
 user_url = f"{BASE_URL}/v2/users"
 user_resp = requests.post(user_url, headers=headers, json=user_payload)
-user_resp.raise_for_status()
-user_data = user_resp.json()
-print("✅ User created successfully.")
-print(json.dumps(user_data, indent=2))
 
-# === Step 5: Save user_id.txt ===
-user_id = user_data.get("result", {}).get("id")
-if user_id and user_id.startswith("identity/users/"):
-    user_id = user_id.split("/")[-1]
-    with open(USER_ID_FILE, "w") as f:
-        f.write(user_id)
-    print(f"📝 User ID saved to {USER_ID_FILE}: {user_id}")
+if user_resp.status_code == 409:
+    print(f"ℹ️ User '{USER_NAME}' already exists. Skipping creation.")
+    # Optional: Try to fetch existing user's ID
+    list_resp = requests.get(user_url, headers=headers, params={"name": USER_NAME})
+    list_resp.raise_for_status()
+    results = list_resp.json().get("results", [])
+    if results:
+        user_id = results[0]["id"].split("/")[-1]
+        with open(USER_ID_FILE, "w") as f:
+            f.write(user_id)
+        print(f"📝 Existing user ID saved to {USER_ID_FILE}: {user_id}")
+    else:
+        print("⚠️ Could not fetch existing user ID.")
 else:
-    print("⚠️ User ID not found or unexpected format.")
+    user_resp.raise_for_status()
+    user_data = user_resp.json()
+    print("✅ User created successfully.")
+    print(json.dumps(user_data, indent=2))
+
+    # === Step 5: Save user_id.txt ===
+    user_id = user_data.get("result", {}).get("id")
+    if user_id and user_id.startswith("identity/users/"):
+        user_id = user_id.split("/")[-1]
+        with open(USER_ID_FILE, "w") as f:
+            f.write(user_id)
+        print(f"📝 User ID saved to {USER_ID_FILE}: {user_id}")
+    else:
+        print("⚠️ User ID not found or unexpected format.")

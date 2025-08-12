@@ -2,27 +2,28 @@
 - name: Fetch .zip files from C:\infoblox and DNS_nios (Downloads), send to GM-UI, unzip DNS_nios.zip
   hosts: dc1,dc2
   gather_facts: no
+
   vars:
     base_dest: "/root/infoblox_files"
-    gm_host: "infoblox-gm-ui"          # reachable via SSH (key-based)
+    gm_host: "infoblox-gm-ui"      # reachable via SSH (key-based)
     gm_base: "/home/user"
 
   tasks:
     # --- Controller prep ---
     - name: Ensure base destination exists on controller
+      delegate_to: localhost
       ansible.builtin.file:
         path: "{{ base_dest }}"
         state: directory
         mode: "0755"
-      delegate_to: localhost
       run_once: true
 
     - name: Ensure per-DC dest exists on controller
+      delegate_to: localhost
       ansible.builtin.file:
         path: "{{ base_dest }}/{{ inventory_hostname | upper }}"
         state: directory
         mode: "0755"
-      delegate_to: localhost
 
     # --- Collect *.zip from C:\infoblox ---
     - name: Find .zip files in C:\infoblox
@@ -32,13 +33,25 @@
         file_type: file
       register: infoblox_zips
 
-    - name: Copy each .zip from DC to controller
-      ansible.windows.win_copy:
-        src: "{{ item.path }}"
-        dest: "{{ base_dest }}/{{ inventory_hostname | upper }}/"
-        remote_src: yes
+    - name: Read each .zip as base64 from Windows
+      ansible.windows.win_shell: |
+        $p = '{{ zipf.path }}'
+        $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+        $b64
       loop: "{{ infoblox_zips.files | default([]) }}"
+      loop_control:
+        loop_var: zipf
+      register: read_zips
       when: (infoblox_zips.files | default([]) | length) > 0
+
+    - name: Write downloaded zips to controller
+      delegate_to: localhost
+      ansible.builtin.copy:
+        dest: "{{ base_dest }}/{{ inventory_hostname | upper }}/{{ (item.zipf.path | regex_replace('^.*\\\\','')) }}"
+        content: "{{ item.stdout | regex_replace('\\r?\\n','') | b64decode }}"
+        mode: "0644"
+      loop: "{{ read_zips.results | default([]) }}"
+      when: item is defined and (item.stdout | default('')) != ''
 
     # --- DNS_nios from Downloads: zip then fetch ---
     - name: Check if DNS_nios folder exists (Downloads)
@@ -46,10 +59,10 @@
         path: "C:\\Users\\Administrator\\Downloads\\DNS_nios"
       register: dns_nios_dir
 
-    - name: Zip DNS_nios folder into Downloads\\DNS_nios.zip (PowerShell)
+    - name: Zip DNS_nios folder into Downloads\DNS_nios.zip (PowerShell)
       ansible.windows.win_shell: |
-        $src = "C:\Users\Administrator\Downloads\DNS_nios"
-        $zip = "C:\Users\Administrator\Downloads\DNS_nios.zip"
+        $src = 'C:\Users\Administrator\Downloads\DNS_nios'
+        $zip = 'C:\Users\Administrator\Downloads\DNS_nios.zip'
         if (Test-Path $src) {
           if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
           Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -Force
@@ -61,40 +74,55 @@
         path: "C:\\Users\\Administrator\\Downloads\\DNS_nios.zip"
       register: dns_nios_zip
 
-    - name: Fetch DNS_nios.zip (if it exists)
-      ansible.windows.win_copy:
-        src: "C:\\Users\\Administrator\\Downloads\\DNS_nios.zip"
-        dest: "{{ base_dest }}/{{ inventory_hostname | upper }}/"
-        remote_src: yes
+    - name: Read DNS_nios.zip as base64 from Windows
+      ansible.windows.win_shell: |
+        $p = 'C:\Users\Administrator\Downloads\DNS_nios.zip'
+        if (Test-Path $p) {
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+        }
+      register: dns_b64
       when: dns_nios_zip.stat.exists | default(false)
 
-    # --- Push to GM-UI ---
-    - name: Ensure DC-specific folder on GM-UI
-      ansible.builtin.command:
-        argv:
-          - ssh
-          - "{{ gm_host }}"
-          - "mkdir -p {{ gm_base }}/{{ inventory_hostname | upper }}"
+    - name: Write DNS_nios.zip to controller
       delegate_to: localhost
+      ansible.builtin.copy:
+        dest: "{{ base_dest }}/{{ inventory_hostname | upper }}/DNS_nios-{{ inventory_hostname | lower }}.zip"
+        content: "{{ dns_b64.stdout | default('') | regex_replace('\\r?\\n','') | b64decode }}"
+        mode: "0644"
+      when: dns_b64 is defined and (dns_b64.stdout | default('')) != ''
+
+    # --- Push to GM-UI ---
+    - name: Add GM-UI host key to known_hosts on controller
+      delegate_to: localhost
+      ansible.builtin.known_hosts:
+        name: "{{ gm_host }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -t ecdsa -H ' ~ gm_host) }}"
+        path: "~/.ssh/known_hosts"
+        state: present
+
+    - name: Ensure DC-specific folder on GM-UI
+      delegate_to: localhost
+      ansible.builtin.command:
+        argv: ["ssh", "{{ gm_host }}", "mkdir -p {{ gm_base }}/{{ inventory_hostname | upper }}"]
       changed_when: true
 
     - name: Get list of fetched files for this DC on controller
+      delegate_to: localhost
       ansible.builtin.find:
         paths: "{{ base_dest }}/{{ inventory_hostname | upper }}"
         file_type: file
-      delegate_to: localhost
       register: local_files
 
     - name: Copy fetched files to GM-UI (per-file scp)
+      delegate_to: localhost
       ansible.builtin.command:
         argv:
           - scp
-          - "-r"
+          - "-p"
           - "{{ item.path }}"
           - "{{ gm_host }}:{{ gm_base }}/{{ inventory_hostname | upper }}/"
-      loop: "{{ local_files.files }}"
-      when: (local_files.matched | default(0)) | int > 0
-      delegate_to: localhost
+      loop: "{{ local_files.files | default([]) }}"
+      when: (local_files.files | default([]) | length) > 0
       changed_when: true
 
     # --- Unzip DNS_nios.zip on GM-UI (optional, if present) ---
@@ -107,20 +135,27 @@
         ssh {{ gm_host }} 'bash -lc "
           set -e
           cd {{ gm_base }}/{{ dc_upper }} || exit 0
-          # Ensure unzip exists; if not, try to install (comment if not allowed)
-          if ! command -v unzip >/dev/null 2>&1; then
-            if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y unzip || true; fi
-            if command -v yum >/dev/null 2>&1; then yum install -y unzip || true; fi
-          fi
-          # Collect matching files first; only loop if we have any
           files=\$(ls -1 DNS_nios*.zip 2>/dev/null || true)
           if [ -n \"\$files\" ]; then
+            command -v unzip >/dev/null 2>&1 || true
             for z in \$files; do
               d=\"\${z%.zip}\"
               mkdir -p \"\$d\"
-              unzip -o \"\$z\" -d \"\$d\"
+              unzip -o \"\$z\" -d \"\$d\" || true
               rm -f \"\$z\"
             done
           fi
         "'
       changed_when: true
+
+    - name: List GM-UI directory after copy/unzip
+      delegate_to: localhost
+      ansible.builtin.command:
+        argv: ["ssh", "{{ gm_host }}", "ls -la {{ gm_base }}/{{ inventory_hostname | upper }}"]
+      register: gm_listing
+      changed_when: false
+
+    - name: Show GM-UI listing
+      delegate_to: localhost
+      ansible.builtin.debug:
+        var: gm_listing.stdout_lines

@@ -1,10 +1,12 @@
 ---
-- name: Fetch only *.zip from C:\infoblox on each DC
+- name: Fetch only *.zip from C:\infoblox on each DC and send to GM-UI
   hosts: dc1,dc2
   gather_facts: no
 
   vars:
     base_dest: "/root/infoblox_files"
+    gm_ui_host: "infoblox-gm-ui"
+    gm_ui_dest: "/home/user"
 
   tasks:
     - name: Ensure local base and host folders exist
@@ -34,3 +36,8 @@
       when: found_zips.files | length == 0
       ansible.builtin.debug:
         msg: "No .zip files found on {{ inventory_hostname }} under C:\\infoblox"
+
+    - name: Copy fetched zips to GM-UI via SCP
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        scp -r {{ base_dest }}/{{ inventory_hostname | upper }} {{ gm_ui_host }}:{{ gm_ui_dest }}

@@ -1,0 +1,78 @@
+---
+- name: Add Edge favorite (single user) – Infoblox CSP
+  hosts: windows
+  gather_facts: no
+
+  vars:
+    edge_fav_name: "Infoblox CSP"
+    edge_fav_url:  "https://csp.infoblox.com/"
+
+  tasks:
+    - name: Ensure Edge is not running (safe)
+      ansible.windows.win_shell: |
+        $p = Get-Process -Name msedge -ErrorAction SilentlyContinue
+        if ($p) { $p | Stop-Process -Force }
+        exit 0
+      args:
+        executable: PowerShell
+      changed_when: false
+
+    - name: Add favorite to Edge Bookmarks Bar (current user profile)
+      ansible.windows.win_shell: |
+        $Name = "{{ edge_fav_name }}"
+        $Url  = "{{ edge_fav_url }}"
+        $UserData = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
+        $Profile  = Join-Path $UserData 'Default'
+        $BkFile   = Join-Path $Profile 'Bookmarks'
+
+        # Ensure profile directory exists
+        New-Item -Path $Profile -ItemType Directory -Force | Out-Null
+
+        function New-Skeleton {
+          [ordered]@{
+            roots = [ordered]@{
+              bookmark_bar = [ordered]@{ children=@(); name='Bookmarks bar'; type='folder' }
+              other        = [ordered]@{ children=@(); name='Other bookmarks'; type='folder' }
+              synced       = [ordered]@{ children=@(); name='Mobile bookmarks'; type='folder' }
+            }
+            version = 1
+          }
+        }
+
+        $changed = $false
+        if (Test-Path $BkFile) {
+          try { $obj = (Get-Content -Raw -LiteralPath $BkFile -Encoding UTF8) | ConvertFrom-Json -ErrorAction Stop }
+          catch { $obj = New-Skeleton }
+        } else {
+          $obj = New-Skeleton
+          $changed = $true
+        }
+
+        if (-not $obj.roots.bookmark_bar) { 
+          $obj.roots.bookmark_bar = [ordered]@{ children=@(); name='Bookmarks bar'; type='folder' }
+        }
+        if (-not $obj.roots.bookmark_bar.children) { $obj.roots.bookmark_bar.children = @() }
+
+        $exists = $obj.roots.bookmark_bar.children | Where-Object { $_.type -eq 'url' -and $_.url -eq $Url }
+        if (-not $exists) {
+          $obj.roots.bookmark_bar.children += [ordered]@{ type='url'; name=$Name; url=$Url }
+          $changed = $true
+        }
+
+        if ($changed) {
+          $obj | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $BkFile -Encoding UTF8
+          'CHANGED'
+        } else {
+          'OK'
+        }
+      args:
+        executable: PowerShell
+      register: edge_fav
+      changed_when: "'CHANGED' in (edge_fav.stdout | default(''))"
+
+    - name: Optionally open Edge favorites page
+      ansible.windows.win_shell: Start-Process msedge.exe 'edge://favorites'
+      args:
+        executable: PowerShell
+      when: false
+      ignore_errors: yes

@@ -1,0 +1,36 @@
+---
+- name: Fetch only *.zip from C:\infoblox on each DC
+  hosts: dc1,dc2
+  gather_facts: no
+
+  vars:
+    base_dest: "/root/infoblox_files"
+
+  tasks:
+    - name: Ensure local base and host folders exist
+      delegate_to: localhost
+      run_once: false
+      ansible.builtin.file:
+        path: "{{ base_dest }}/{{ inventory_hostname | upper }}"
+        state: directory
+        mode: "0755"
+
+    - name: Find zip files on remote C:\infoblox (recursive)
+      ansible.windows.win_find:
+        paths: "C:\\infoblox"
+        patterns: "*.zip"
+        recurse: yes
+      register: found_zips
+
+    - name: Fetch each zip to controller
+      when: found_zips.files | length > 0
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ base_dest }}/{{ inventory_hostname | upper }}/"
+        flat: yes
+      loop: "{{ found_zips.files }}"
+
+    - name: Warn if no zip files found
+      when: found_zips.files | length == 0
+      ansible.builtin.debug:
+        msg: "No .zip files found on {{ inventory_hostname }} under C:\\infoblox"

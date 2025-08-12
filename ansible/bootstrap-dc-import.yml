@@ -187,6 +187,35 @@
       when: inventory_hostname == "dc1"
       tags: [dns_import]
 
+    # Make sure the DNS service is up
+    - name: Ensure DNS service is running (DC1)
+      ansible.windows.win_service:
+        name: DNS
+        state: started
+        start_mode: auto
+      when: inventory_hostname == "dc1"
+
+    # Prove DNS can CREATE a zone (write-ready) before we run the importer
+    - name: Wait until DNS can create & delete a test zone (DC1)
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $z = 'ansible-probe.local'
+        try {
+            if (Get-DnsServerZone -Name $z -ErrorAction SilentlyContinue) {
+            Remove-DnsServerZone -Name $z -Force
+            }
+            Add-DnsServerPrimaryZone -Name $z -ZoneFile "$z.dns" -ErrorAction Stop | Out-Null
+            Remove-DnsServerZone -Name $z -Force -ErrorAction Stop
+            exit 0
+        } catch {
+          exit 1
+        }
+      register: dns_writable
+      retries: 20
+      delay: 15
+      until: dns_writable.rc == 0
+      when: inventory_hostname == "dc1"
+
     - name: Validate DNS import (DryRun) on DC1
       ansible.windows.win_shell: |
         Set-Location {{ dns_import_dir }}

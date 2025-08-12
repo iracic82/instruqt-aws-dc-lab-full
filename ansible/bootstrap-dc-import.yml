@@ -263,3 +263,27 @@
         ipv4_addresses:
           - "{{ dc1_ip if inventory_hostname == 'dc1' else dc2_ip }}"
           - "{{ dc2_ip if inventory_hostname == 'dc1' else dc1_ip }}"
+    # --------------------------------
+    # Copy migration helper scripts to both DCs
+    # --------------------------------
+    - name: Ensure C:\infoblox exists
+      ansible.windows.win_file:
+        path: C:\infoblox
+        state: directory
+      tags: [migration_scripts]
+
+    - name: Copy migration scripts to C:\infoblox
+      ansible.windows.win_copy:
+        src: "{{ playbook_dir }}/migration/{{ item }}"
+        dest: "C:\\infoblox\\"
+      loop:
+        - ad-dc-convert-go-live.cmd
+        - ad-dc-convert-roll-back.cmd
+        - extract-ms-dns.ps1
+      tags: [migration_scripts]
+
+    - name: Unblock PowerShell scripts in C:\infoblox
+      ansible.windows.win_shell: |
+        PowerShell -NoProfile -ExecutionPolicy Bypass -Command "Unblock-File -Path 'C:\infoblox\*.ps1' -Force"
+        changed_when: false
+      tags: [migration_scripts]

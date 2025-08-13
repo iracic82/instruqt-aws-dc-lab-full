@@ -3,6 +3,7 @@ output "domain_controllers" {
   value = {
     dc1 = aws_eip.dc1_eip.public_ip
     dc2 = aws_eip.dc2_eip.public_ip
+    dc3 = aws_eip.dc3_eip.public_ip
   }
 }
 
@@ -19,6 +20,9 @@ Use the following commands (from your local machine):
 
   # For DC2
   ssh -i ./instruqt-dc-key.pem Administrator@${aws_eip.dc2_eip.public_ip}
+
+  # For Client
+  ssh -i ./instruqt-dc-key.pem Administrator@${aws_eip.dc3_eip.public_ip}
 
 OR
 

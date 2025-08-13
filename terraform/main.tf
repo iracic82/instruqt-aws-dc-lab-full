@@ -271,7 +271,7 @@ resource "aws_eip_association" "dc2_assoc" {
 }
 
 # Elastic IP for client
-resource "aws_eip" "client_eip" {
+resource "aws_eip" "dc3_eip" {
   provider = aws.eu-central-1
   vpc      = true
   tags = { Name = "client-vm-eip" }
@@ -311,6 +311,6 @@ resource "aws_instance" "client_vm" {
 resource "aws_eip_association" "client_assoc" {
   provider              = aws.eu-central-1
   network_interface_id  = aws_network_interface.client_eni.id
-  allocation_id         = aws_eip.client_eip.id
+  allocation_id         = aws_eip.dc3_eip.id
   private_ip_address    = "10.100.2.111"
 }

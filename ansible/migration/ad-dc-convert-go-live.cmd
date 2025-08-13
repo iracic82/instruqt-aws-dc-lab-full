@@ -24,7 +24,7 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\DNS\Parameters" /v BootMethod /d
 
 
 :: Update DNS Server Setting applying new forwarders
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\DNS\Parameters" /v Forwarders /d N.N.N.N\0N.N.N.N /t REG_MULTI_SZ /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\DNS\Parameters" /v Forwarders /d 10.100.2.11 /t REG_MULTI_SZ /f
 
 :: Start DNS Service
 net start dns

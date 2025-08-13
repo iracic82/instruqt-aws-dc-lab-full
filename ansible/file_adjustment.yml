@@ -1,16 +1,16 @@
 ---
-- name: Clean AuthZone CSV to 6 required columns (fixed order, newest match)
+- name: Clean AuthZone CSV to 6 required columns (fixed order, newest match, idempotent)
   hosts: windows
   gather_facts: no
 
   vars:
-    # Where to look (first match by newest LastWriteTime wins)
     candidate_dirs:
       - 'C:\Users\Administrator\Downloads\DNS_nios'
       - 'C:\Users\Administrator\Downloads'
       - 'C:\Downloads\DNS_nios'
     authzone_pattern: '*AuthZone.csv'
 
+    # Desired headers in final, fixed order
     desired_columns:
       - 'Header-AuthZone'
       - 'fqdn*'
@@ -19,31 +19,46 @@
       - 'ns_group'
       - 'soa_serial_number'
 
+    # Optional header aliases to normalize source columns
+    header_aliases:
+      'fqdn': 'fqdn*'
+      'zone_format': 'zone_format*'
+      'soa_serial': 'soa_serial_number'
+
   tasks:
-    - name: Trim/reshape CSV (overwrite file, write .bak once)
+    - name: Trim/reshape CSV (overwrite only if changed; write/refresh .bak)
       ansible.windows.win_powershell:
         parameters:
           Dirs: "{{ candidate_dirs }}"
           Pattern: "{{ authzone_pattern }}"
           Desired: "{{ desired_columns }}"
+          Aliases: "{{ header_aliases }}"
+          CheckMode: "{{ ansible_check_mode | default(false) }}"
         script: |
           param(
             [string[]] $Dirs,
             [string]   $Pattern,
-            [string[]] $Desired
+            [string[]] $Desired,
+            [hashtable] $Aliases,
+            [bool] $CheckMode = $false
           )
 
-          # Find newest matching CSV across candidate dirs
-          $files = foreach ($d in $Dirs) {
-            if (Test-Path -LiteralPath $d) {
-              Get-ChildItem -LiteralPath $d -Filter $Pattern -File -ErrorAction SilentlyContinue
+          function Get-NewestMatch {
+            param([string[]]$Dirs,[string]$Pattern)
+            $files = foreach ($d in $Dirs) {
+              if (Test-Path -LiteralPath $d) {
+                Get-ChildItem -LiteralPath $d -Filter $Pattern -File -ErrorAction SilentlyContinue
+              }
             }
+            if (-not $files) { return $null }
+            return $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           }
-          if (-not $files) {
+
+          $target = Get-NewestMatch -Dirs $Dirs -Pattern $Pattern
+          if (-not $target) {
             Write-Output "[SKIP] No files matching '$Pattern' under: $($Dirs -join ', ')"
             exit 0
           }
-          $target = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
           # Ensure writable
           $fi = Get-Item -LiteralPath $target.FullName
@@ -51,47 +66,78 @@
             $fi.Attributes = $fi.Attributes -bxor [IO.FileAttributes]::ReadOnly
           }
 
-          # Backup once (or when source is newer)
-          $bak = "$($target.FullName).bak"
-          if ((-not (Test-Path -LiteralPath $bak)) -or
-              ((Get-Item -LiteralPath $bak).LastWriteTime -lt (Get-Item -LiteralPath $target.FullName).LastWriteTime)) {
-            Copy-Item -LiteralPath $target.FullName -Destination $bak -Force
-          }
-
-          # Import rows
+          # Import CSV (as objects)
           $rows = Import-Csv -LiteralPath $target.FullName
           if (-not $rows) { Write-Output "[SKIP] '$($target.FullName)' is empty."; exit 0 }
 
-          # Normalize each row, then emit in fixed Desired order
-          $out = foreach ($r in $rows) {
-            # Default Header-AuthZone if missing/blank
+          # Make a copy of the header set and apply aliases
+          $existing = $rows[0].PSObject.Properties.Name
+          $map = @{}
+          foreach ($name in $existing) {
+            if ($Aliases.ContainsKey($name)) {
+              $map[$Aliases[$name]] = $name
+            } else {
+              $map[$name] = $name
+            }
+          }
+
+          # Build normalized rows in the Desired order, auto-fill Header-AuthZone
+          $normalized = foreach ($r in $rows) {
             $hdrProp = $r.PSObject.Properties['Header-AuthZone']
             $hdr = if ($hdrProp -and -not [string]::IsNullOrWhiteSpace($hdrProp.Value)) { $hdrProp.Value } else { 'AuthZone' }
 
-            # Gather known fields (works with weird names like 'fqdn*')
-            $norm = @{
-              'Header-AuthZone'   = $hdr
-              'fqdn*'             = ($r.PSObject.Properties['fqdn*']             | ForEach-Object Value)
-              'zone_format*'      = ($r.PSObject.Properties['zone_format*']      | ForEach-Object Value)
-              'view'              = ($r.PSObject.Properties['view']              | ForEach-Object Value)
-              'ns_group'          = ($r.PSObject.Properties['ns_group']          | ForEach-Object Value)
-              'soa_serial_number' = ($r.PSObject.Properties['soa_serial_number'] | ForEach-Object Value)
-            }
-
             $o = [ordered]@{}
             foreach ($h in $Desired) {
-              if ($norm.ContainsKey($h) -and $null -ne $norm[$h]) { $o[$h] = $norm[$h] } else { $o[$h] = "" }
+              if ($h -eq 'Header-AuthZone') {
+                $o[$h] = $hdr
+                continue
+              }
+              if ($map.ContainsKey($h) -and $r.PSObject.Properties[$map[$h]]) {
+                $o[$h] = $r.PSObject.Properties[$map[$h]].Value
+              } else {
+                $o[$h] = ""
+              }
             }
             [pscustomobject]$o
           }
 
-          # Overwrite original (UTF-8)
-          $out | Export-Csv -LiteralPath $target.FullName -NoTypeInformation -Encoding UTF8 -Force
+          # Produce CSV in-memory to compare content (idempotent)
+          $tmp = New-TemporaryFile
+          try {
+            $normalized | Export-Csv -LiteralPath $tmp.FullName -NoTypeInformation -Encoding UTF8 -Force
 
-          Write-Output "[UPDATED] $($target.FullName)"
-          Write-Output "[COLUMNS] $($Desired -join ', ')"
-          Write-Output "[PEEK]"
-          (Get-Content -LiteralPath $target.FullName -TotalCount 3)
+            $origText = Get-Content -LiteralPath $target.FullName -Raw
+            $newText  = Get-Content -LiteralPath $tmp.FullName    -Raw
+            if ($origText -eq $newText) {
+              Write-Output "[OK] Already up to date: $($target.FullName)"
+              Remove-Item $tmp -Force
+              exit 0
+            }
+
+            if ($CheckMode) {
+              Write-Output "[DRY-RUN] Would update: $($target.FullName)"
+              Remove-Item $tmp -Force
+              exit 0
+            }
+
+            # Backup once (or when source is newer)
+            $bak = "$($target.FullName).bak"
+            if ((-not (Test-Path -LiteralPath $bak)) -or
+                ((Get-Item -LiteralPath $bak).LastWriteTime -lt (Get-Item -LiteralPath $target.FullName).LastWriteTime)) {
+              Copy-Item -LiteralPath $target.FullName -Destination $bak -Force
+            }
+
+            # Overwrite with normalized content
+            Copy-Item -LiteralPath $tmp.FullName -Destination $target.FullName -Force
+
+            Write-Output "[UPDATED] $($target.FullName)"
+            Write-Output "[COLUMNS] $($Desired -join ', ')"
+            Write-Output "[PEEK]"
+            (Get-Content -LiteralPath $target.FullName -TotalCount 3)
+          }
+          finally {
+            if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+          }
       vars:
         ansible_win_powershell_params:
           - NonInteractive

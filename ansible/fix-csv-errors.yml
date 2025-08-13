@@ -1,0 +1,113 @@
+---
+- name: Clean GM-UI CSV, remove error col, re-upload
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    gm_host: "infoblox-gm-ui"
+    gm_dir: "/home/user/Downloads"
+    src_csv: "csv-error.3.csv"                  # on GM-UI
+    out_csv: "csv-error.3.fixed.csv"            # corrected file name on GM-UI
+    work_dir: "/root/infoblox_files/GMUI"       # scratch on controller
+
+  tasks:
+    - name: Ensure known_hosts has GM-UI key
+      ansible.builtin.known_hosts:
+        name: "{{ gm_host }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -t ecdsa -H ' ~ gm_host) }}"
+        path: "~/.ssh/known_hosts"
+        state: present
+
+    - name: Ensure local work dir exists
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Pull CSV from GM-UI -> controller
+      ansible.builtin.command:
+        argv:
+          - scp
+          - "-p"
+          - "{{ gm_host }}:{{ gm_dir }}/{{ src_csv }}"
+          - "{{ work_dir }}/"
+      changed_when: true
+
+    - name: Drop Python transformer
+      ansible.builtin.copy:
+        dest: "{{ work_dir }}/process_csv.py"
+        mode: "0755"
+        content: |
+          #!/usr/bin/env python3
+          import csv, sys, os
+
+          src = sys.argv[1]
+          dst = sys.argv[2]
+
+          with open(src, newline='', encoding='utf-8') as f_in:
+              reader = csv.reader(f_in)
+              rows = list(reader)
+          if not rows:
+              sys.exit(0)
+
+          # Remove first column entirely
+          header = rows[0][1:]
+          try:
+              fqdn_idx = header.index('fqdn*')
+          except ValueError:
+              sys.exit(0)
+
+          kept = dropped = 0
+          with open(dst, 'w', newline='', encoding='utf-8') as f_out:
+              w = csv.writer(f_out)
+              w.writerow(header)
+              for r in rows[1:]:
+                  if not r:
+                      continue
+                  error_col = r[0]
+                  if "Cannot add records to a zone that is not authoritative" in error_col:
+                      dropped += 1
+                      continue
+                  new_row = r[1:]
+                  if len(new_row) > fqdn_idx and new_row[fqdn_idx] is not None:
+                      new_row[fqdn_idx] = new_row[fqdn_idx].replace("/", "-")
+                  w.writerow(new_row)
+                  kept += 1
+
+          print(f"[SUMMARY] kept={kept}, dropped={dropped}, removed_error_column=True")
+
+    - name: Run transformer
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ work_dir }}/process_csv.py"
+          - "{{ work_dir }}/{{ src_csv }}"
+          - "{{ work_dir }}/{{ out_csv }}"
+      register: transform_out
+      changed_when: "'[SUMMARY] ' in (transform_out.stdout | default(''))"
+
+    - name: Show summary
+      ansible.builtin.debug:
+        msg: "{{ transform_out.stdout | default('no output') }}"
+
+    - name: Push corrected CSV back to GM-UI
+      ansible.builtin.command:
+        argv:
+          - scp
+          - "-p"
+          - "{{ work_dir }}/{{ out_csv }}"
+          - "{{ gm_host }}:{{ gm_dir }}/{{ out_csv }}"
+      changed_when: true
+
+    - name: List files on GM-UI
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - "{{ gm_host }}"
+          - "ls -l {{ gm_dir }}/{{ src_csv }} {{ gm_dir }}/{{ out_csv }}"
+      register: gm_ls
+      changed_when: false
+
+    - name: Show GM-UI listing
+      ansible.builtin.debug:
+        var: gm_ls.stdout_lines

@@ -34,12 +34,13 @@ if not aws_access_key_id or not aws_secret_access_key or not hosted_zone_id:
 participant_id = os.getenv("INSTRUQT_PARTICIPANT_ID")
 dc1_ip = os.getenv("DC1_IP")
 dc2_ip = os.getenv("DC2_IP")
+dc3_ip = os.getenv("DC3_IP")
 
 if not participant_id:
     log("❌ ERROR: INSTRUQT_PARTICIPANT_ID is not set")
     sys.exit(1)
 
-if not dc1_ip or not dc2_ip:
+if not dc1_ip or not dc2_ip or not dc3_ip:
     log("❌ ERROR: DC1_IP and DC2_IP must both be set")
     sys.exit(1)
 
@@ -49,6 +50,7 @@ if not dc1_ip or not dc2_ip:
 records = {
     f"{participant_id}-dc1.iracictechguru.com.": dc1_ip,
     f"{participant_id}-dc2.iracictechguru.com.": dc2_ip,
+    f"{participant_id}-dc3.iracictechguru.com.": dc3_ip,
 }
 
 # ---------------------------

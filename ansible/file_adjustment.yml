@@ -1,0 +1,107 @@
+---
+- name: Clean AuthZone CSV to 6 required columns (fixed order, newest match)
+  hosts: windows
+  gather_facts: no
+
+  vars:
+    # Where to look (first match by newest LastWriteTime wins)
+    candidate_dirs:
+      - 'C:\Users\Administrator\Downloads\DNS_nios'
+      - 'C:\Users\Administrator\Downloads'
+      - 'C:\Downloads\DNS_nios'
+    authzone_pattern: '*AuthZone.csv'
+
+    desired_columns:
+      - 'Header-AuthZone'
+      - 'fqdn*'
+      - 'zone_format*'
+      - 'view'
+      - 'ns_group'
+      - 'soa_serial_number'
+
+  tasks:
+    - name: Trim/reshape CSV (overwrite file, write .bak once)
+      ansible.windows.win_powershell:
+        parameters:
+          Dirs: "{{ candidate_dirs }}"
+          Pattern: "{{ authzone_pattern }}"
+          Desired: "{{ desired_columns }}"
+        script: |
+          param(
+            [string[]] $Dirs,
+            [string]   $Pattern,
+            [string[]] $Desired
+          )
+
+          # Find newest matching CSV across candidate dirs
+          $files = foreach ($d in $Dirs) {
+            if (Test-Path -LiteralPath $d) {
+              Get-ChildItem -LiteralPath $d -Filter $Pattern -File -ErrorAction SilentlyContinue
+            }
+          }
+          if (-not $files) {
+            Write-Output "[SKIP] No files matching '$Pattern' under: $($Dirs -join ', ')"
+            exit 0
+          }
+          $target = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+          # Ensure writable
+          $fi = Get-Item -LiteralPath $target.FullName
+          if ($fi.Attributes -band [IO.FileAttributes]::ReadOnly) {
+            $fi.Attributes = $fi.Attributes -bxor [IO.FileAttributes]::ReadOnly
+          }
+
+          # Backup once (or when source is newer)
+          $bak = "$($target.FullName).bak"
+          if ((-not (Test-Path -LiteralPath $bak)) -or
+              ((Get-Item -LiteralPath $bak).LastWriteTime -lt (Get-Item -LiteralPath $target.FullName).LastWriteTime)) {
+            Copy-Item -LiteralPath $target.FullName -Destination $bak -Force
+          }
+
+          # Import rows
+          $rows = Import-Csv -LiteralPath $target.FullName
+          if (-not $rows) { Write-Output "[SKIP] '$($target.FullName)' is empty."; exit 0 }
+
+          # Normalize each row, then emit in fixed Desired order
+          $out = foreach ($r in $rows) {
+            # Default Header-AuthZone if missing/blank
+            $hdrProp = $r.PSObject.Properties['Header-AuthZone']
+            $hdr = if ($hdrProp -and -not [string]::IsNullOrWhiteSpace($hdrProp.Value)) { $hdrProp.Value } else { 'AuthZone' }
+
+            # Gather known fields (works with weird names like 'fqdn*')
+            $norm = @{
+              'Header-AuthZone'   = $hdr
+              'fqdn*'             = ($r.PSObject.Properties['fqdn*']             | ForEach-Object Value)
+              'zone_format*'      = ($r.PSObject.Properties['zone_format*']      | ForEach-Object Value)
+              'view'              = ($r.PSObject.Properties['view']              | ForEach-Object Value)
+              'ns_group'          = ($r.PSObject.Properties['ns_group']          | ForEach-Object Value)
+              'soa_serial_number' = ($r.PSObject.Properties['soa_serial_number'] | ForEach-Object Value)
+            }
+
+            $o = [ordered]@{}
+            foreach ($h in $Desired) {
+              if ($norm.ContainsKey($h) -and $null -ne $norm[$h]) { $o[$h] = $norm[$h] } else { $o[$h] = "" }
+            }
+            [pscustomobject]$o
+          }
+
+          # Overwrite original (UTF-8)
+          $out | Export-Csv -LiteralPath $target.FullName -NoTypeInformation -Encoding UTF8 -Force
+
+          Write-Output "[UPDATED] $($target.FullName)"
+          Write-Output "[COLUMNS] $($Desired -join ', ')"
+          Write-Output "[PEEK]"
+          (Get-Content -LiteralPath $target.FullName -TotalCount 3)
+      vars:
+        ansible_win_powershell_params:
+          - NonInteractive
+          - NoProfile
+          - ExecutionPolicy=Bypass
+      register: trim_result
+      changed_when: >
+        (trim_result.output | default([]) | join(' ')) is search('\[UPDATED\]')
+      failed_when: false
+
+    - name: Show summary
+      ansible.builtin.debug:
+        msg: "{{ (trim_result.output | default([])) | join('\n') }}"

@@ -269,3 +269,48 @@ resource "aws_eip_association" "dc2_assoc" {
   allocation_id        = aws_eip.dc2_eip.id
   private_ip_address   = "10.100.2.100"
 }
+
+# Elastic IP for client
+resource "aws_eip" "client_eip" {
+  provider = aws.eu-central-1
+  vpc      = true
+  tags = { Name = "client-vm-eip" }
+}
+
+# ENI for client (single NIC)
+resource "aws_network_interface" "client_eni" {
+  provider        = aws.eu-central-1
+  subnet_id       = aws_subnet.public_b.id
+  private_ips     = ["10.100.2.111"]
+  security_groups = [aws_security_group.rdp_sg.id]
+  tags = { Name = "client-vm-eni" }
+}
+
+# Windows client instance
+resource "aws_instance" "client_vm" {
+  provider      = aws.eu-central-1
+  ami           = data.aws_ami.windows.id
+  instance_type = "t3.medium"
+  key_name      = aws_key_pair.rdp.key_name
+
+  network_interface {
+    network_interface_id = aws_network_interface.client_eni.id
+    device_index         = 0
+  }
+
+  user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
+    admin_password = var.windows_admin_password
+  })
+
+  tags = { Name = "client_vm" }
+
+  depends_on = [aws_internet_gateway.gw]
+}
+
+# Associate EIP to client ENI
+resource "aws_eip_association" "client_assoc" {
+  provider              = aws.eu-central-1
+  network_interface_id  = aws_network_interface.client_eni.id
+  allocation_id         = aws_eip.client_eip.id
+  private_ip_address    = "10.100.2.111"
+}

@@ -1,14 +1,12 @@
----
-- name: Clean GM-UI CSV, remove error col, re-upload
+- name: Clean GM-UI CSV, remove error col, re-upload (auto-pick csv-error*.csv)
   hosts: localhost
   gather_facts: no
 
   vars:
     gm_host: "infoblox-gm-ui"
     gm_dir: "/home/user/Downloads"
-    src_csv: "csv-error.3.csv"                  # on GM-UI
-    out_csv: "csv-error.3.fixed.csv"            # corrected file name on GM-UI
-    work_dir: "/root/infoblox_files/GMUI"       # scratch on controller
+    work_dir: "/root/infoblox_files/GMUI"   # scratch on controller
+    out_suffix: ".fixed.csv"
 
   tasks:
     - name: Ensure known_hosts has GM-UI key
@@ -24,12 +22,35 @@
         state: directory
         mode: "0755"
 
+    - name: Discover csv-error*.csv on GM-UI
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - "{{ gm_host }}"
+          - "ls -1 {{ gm_dir | quote }}/csv-error*.csv 2>/dev/null || true"
+      register: remote_listing
+      changed_when: false
+
+    - name: Validate discovery result
+      ansible.builtin.fail:
+        msg: >-
+          Expected exactly one csv-error*.csv in {{ gm_dir }} on {{ gm_host }},
+          found {{ (remote_listing.stdout_lines | length) }}:
+          {{ remote_listing.stdout_lines | join(', ') | default('none') }}.
+      when: (remote_listing.stdout_lines | length) != 1
+
+    - name: Set src/out filenames (basename + fixed suffix)
+      ansible.builtin.set_fact:
+        src_path: "{{ remote_listing.stdout_lines[0] }}"
+        src_csv: "{{ remote_listing.stdout_lines[0] | regex_replace('^.*/', '') }}"
+        out_csv: "{{ (remote_listing.stdout_lines[0] | regex_replace('^.*/', '')) ~ out_suffix }}"
+
     - name: Pull CSV from GM-UI -> controller
       ansible.builtin.command:
         argv:
           - scp
           - "-p"
-          - "{{ gm_host }}:{{ gm_dir }}/{{ src_csv }}"
+          - "{{ gm_host }}:{{ src_path }}"
           - "{{ work_dir }}/"
       changed_when: true
 
@@ -39,23 +60,32 @@
         mode: "0755"
         content: |
           #!/usr/bin/env python3
-          import csv, sys, os
+          import csv, sys
 
           src = sys.argv[1]
           dst = sys.argv[2]
+
+          def strip_bom(s):
+              return s.lstrip("\ufeff") if isinstance(s, str) else s
 
           with open(src, newline='', encoding='utf-8') as f_in:
               reader = csv.reader(f_in)
               rows = list(reader)
           if not rows:
+              print("[SUMMARY] kept=0, dropped=0, removed_error_column=True (empty file)")
               sys.exit(0)
 
           # Remove first column entirely
-          header = rows[0][1:]
+          header = [strip_bom(x) for x in rows[0][1:]]
+
+          # Locate fqdn column (support 'fqdn*' or 'fqdn')
           try:
               fqdn_idx = header.index('fqdn*')
           except ValueError:
-              sys.exit(0)
+              try:
+                  fqdn_idx = header.index('fqdn')
+              except ValueError:
+                  fqdn_idx = None
 
           kept = dropped = 0
           with open(dst, 'w', newline='', encoding='utf-8') as f_out:
@@ -64,12 +94,13 @@
               for r in rows[1:]:
                   if not r:
                       continue
-                  error_col = r[0]
-                  if "Cannot add records to a zone that is not authoritative" in error_col:
+                  error_col = (r[0] or "")
+                  # Drop non-authoritative zone errors
+                  if "not authoritative" in error_col:
                       dropped += 1
                       continue
                   new_row = r[1:]
-                  if len(new_row) > fqdn_idx and new_row[fqdn_idx] is not None:
+                  if fqdn_idx is not None and len(new_row) > fqdn_idx and new_row[fqdn_idx]:
                       new_row[fqdn_idx] = new_row[fqdn_idx].replace("/", "-")
                   w.writerow(new_row)
                   kept += 1

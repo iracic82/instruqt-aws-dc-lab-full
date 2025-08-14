@@ -27,7 +27,7 @@ Use the following commands (from your local machine):
 OR
 
   Open Windows Remote Desktop (mstsc.exe) and connect to:
-    ${aws_eip.dc1_eip.public_ip}  or  ${aws_eip.dc2_eip.public_ip}
+    ${aws_eip.dc1_eip.public_ip}  or  ${aws_eip.dc2_eip.public_ip} or ${aws_eip.dc3_eip.public_ip}
 
   Username: Administrator
   Password: (retrieve from AWS Console → Connect → Get Password using your key)

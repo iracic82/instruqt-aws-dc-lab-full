@@ -1,7 +1,7 @@
 - name: Build AD forest, add 2nd DC, and import DNS zones/records (microsoft.ad)
   hosts: windows
   gather_facts: no
-  serial: 1              # serialize early phases across dc1/dc2 to avoid races
+  serial: 1
   strategy: linear
 
   vars:
@@ -15,7 +15,7 @@
     dns_forwarders: [8.8.8.8, 1.1.1.1]
     dns_import_dir: 'C:\dns-import'
 
-    # WinRM stability knobs (safe to keep here; inventory can override)
+    # WinRM stability knobs
     ansible_connection: winrm
     ansible_winrm_transport: ntlm
     ansible_winrm_server_cert_validation: ignore
@@ -54,15 +54,36 @@
         adapter_names: '*'
         ipv4_addresses: ["{{ dc1_ip }}"]
 
-    - name: Install ADDS, DNS, DHCP roles + tools
+    # -----------------------------
+    # FAST PATH FEATURE INSTALL (ADDS + DNS only)
+    # -----------------------------
+    - name: Pre-install | Reboot if Windows has a pending reboot
+      ansible.windows.win_powershell:
+        script: |
+          $pending = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+          if ($pending) { 'REBOOT_NEEDED' } else { 'OK' }
+      register: pre_reboot_check
+      changed_when: "'REBOOT_NEEDED' in (pre_reboot_check.stdout | default(''))"
+
+    - name: Pre-install | Reboot Windows (pending reboot was detected)
+      ansible.windows.win_reboot:
+      when: "'REBOOT_NEEDED' in (pre_reboot_check.stdout | default(''))"
+
+    - name: Install ADDS + DNS roles (async, subfeatures)
       ansible.windows.win_feature:
-        name: [AD-Domain-Services, DNS, DHCP]
+        name:
+          - AD-Domain-Services
+          - DNS
         state: present
         include_management_tools: yes
-      register: feat
-      retries: 3
-      delay: 30
-      until: feat is succeeded
+        include_sub_features: yes
+      register: adds_dns_feat
+      async: 1800
+      poll: 15
+
+    - name: Reboot if ADDS/DNS requested it
+      ansible.windows.win_reboot:
+      when: adds_dns_feat.reboot_required | default(false) | bool
 
     # -----------------------------
     # DC1: Create forest root domain
@@ -249,28 +270,21 @@
           $enlistedAny = $false
 
           foreach ($name in $parts) {
-            # Check current
             $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -ieq $name }
             if ($p -and $p.Enlisted) { Write-Host ("OK: {0} already enlisted" -f $name); continue }
 
-            # Try PowerShell
             $psOK = $true
             try { Register-DnsServerDirectoryPartition -Name $name -ComputerName localhost -ErrorAction Stop }
             catch { $psOK = $false; Write-Host ("INFO: PS enlist for {0}: {1}" -f $name, $_.Exception.Message) }
 
-            # Fallback to dnscmd (correct syntax)
             if (-not $psOK) {
-              try {
-                dnscmd localhost /EnlistDirectoryPartition $name | Out-String | Write-Output
-              } catch {
-                Write-Host ("INFO: dnscmd enlist for {0}: {1}" -f $name, $_.Exception.Message)
-              }
+              try { dnscmd localhost /EnlistDirectoryPartition $name | Out-String | Write-Output }
+              catch { Write-Host ("INFO: dnscmd enlist for {0}: {1}" -f $name, $_.Exception.Message) }
             }
 
             Start-Sleep -Seconds 2
 
-            # Verify again
             $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -ieq $name }
             if ($p -and $p.Enlisted) { Write-Host ("OK: {0} enlisted" -f $name); $enlistedAny = $true }
@@ -296,7 +310,6 @@
             $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
             if (-not $cur.IsDsIntegrated) {
               dnscmd /ZoneResetType $z /DsPrimary | Out-Null
-              # refresh view after convert
               $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
             }
             if ($cur.ReplicationScope -ne 'Domain') {
@@ -313,34 +326,22 @@
       ansible.windows.win_shell: |
         $ErrorActionPreference = 'Stop'
         Import-Module ActiveDirectory
-
-        # Build the domain DN from the DNS name (e.g. DC=corp,DC=infolab)
         $domainDn = "DC={{ domain_name | regex_replace('\\.',',DC=') }}"
 
-        # 1) Ensure DC2 is actually a DC and reachable; if not, skip gracefully
-        try {
-          $null = Get-ADDomainController -Server "{{ dc2_ip }}" -ErrorAction Stop
-        } catch {
-          Write-Host ("DC2 not a DC yet or unreachable ({0}); skipping repadmin" -f $_.Exception.Message)
-          exit 0
-        }
+        try { $null = Get-ADDomainController -Server "{{ dc2_ip }}" -ErrorAction Stop }
+        catch { Write-Host ("DC2 not a DC yet or unreachable ({0}); skipping repadmin" -f $_.Exception.Message); exit 0 }
 
-        # 2) Ensure required naming contexts exist locally; if not, skip gracefully
         $ncs = @("DC=DomainDnsZones,$domainDn","DC=ForestDnsZones,$domainDn","$domainDn")
         foreach ($nc in $ncs) {
           try { $null = Get-ADObject -Identity $nc -ErrorAction Stop }
-          catch {
-            Write-Host ("NC {0} not present yet; skipping repadmin" -f $nc)
-            exit 0
-          }
+          catch { Write-Host ("NC {0} not present yet; skipping repadmin" -f $nc); exit 0 }
         }
 
-        # 3) Try full sync; if it returns non-zero, fall back to targeted replicates
         & repadmin /syncall /AdeP | Out-String | Write-Output
         $rc = $LASTEXITCODE
         if ($rc -ne 0) {
           Write-Host ("repadmin /syncall returned {0}; falling back to targeted replicate" -f $rc)
-          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "$domainDn"                  | Out-String | Write-Output
+          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "$domainDn"                   | Out-String | Write-Output
           $rc = $LASTEXITCODE
           & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "DC=DomainDnsZones,$domainDn" | Out-String | Write-Output
           $rc += $LASTEXITCODE
@@ -378,19 +379,16 @@
         script: |
           $ErrorActionPreference = 'Stop'
           Import-Module ActiveDirectory
-          # Discover a solid peer (GC/KDC/TimeService)
           $peer = (Get-ADDomainController -DomainName "{{ domain_name }}" -Discover -ForceDiscover -Service GlobalCatalog,KDC,TimeService).HostName
           if (-not $peer) { $peer = "{{ dc1_ip }}" }
           $domainDn = "DC={{ domain_name | regex_replace('\\.',',DC=') }}"
-          & repadmin /replicate localhost $peer "$domainDn"                  | Out-String | Write-Output
+          & repadmin /replicate localhost $peer "$domainDn"                   | Out-String | Write-Output
           & repadmin /replicate localhost $peer "DC=DomainDnsZones,$domainDn" | Out-String | Write-Output
           & repadmin /replicate localhost $peer "DC=ForestDnsZones,$domainDn" | Out-String | Write-Output
       when: inventory_hostname == "dc2"
       changed_when: false
       failed_when: false
       tags: [dns_replication]
-
-    
 
     # --------------------------------
     # Configure DNS forwarders on DC2
@@ -457,7 +455,6 @@
         start_mode: auto
       when: inventory_hostname == "dc1"
 
-    # AD-integrated probe (no file-backed zones)
     - name: Wait until DNS can create & delete a test AD-integrated zone (DC1)
       ansible.windows.win_shell: |
         Import-Module DnsServer

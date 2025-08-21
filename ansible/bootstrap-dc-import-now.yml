@@ -1,0 +1,493 @@
+- name: Build AD forest, add 2nd DC, and import DNS zones/records (microsoft.ad)
+  hosts: windows
+  gather_facts: no
+  serial: 1              # serialize early phases across dc1/dc2 to avoid races
+  strategy: linear
+
+  vars:
+    domain_name: corp.infolab
+    domain_netbios: CORP
+    # domain_admin_password comes from group_vars/all.yml
+    domain_admin_user: "{{ domain_netbios }}\\Administrator"
+    domain_admin_password: "{{ domain_admin_password }}"
+    dc1_ip: 10.100.1.100
+    dc2_ip: 10.100.1.101
+    dns_forwarders: [8.8.8.8, 1.1.1.1]
+    dns_import_dir: 'C:\dns-import'
+
+    # WinRM stability knobs (safe to keep here; inventory can override)
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_winrm_server_cert_validation: ignore
+    ansible_winrm_operation_timeout_sec: 60
+    ansible_winrm_read_timeout_sec: 70
+
+  tasks:
+    # -----------------------------
+    # Preflight (auth + time)
+    # -----------------------------
+    - name: Preflight | Verify WinRM auth on each host
+      ansible.windows.win_whoami:
+      register: who
+      retries: 6
+      delay: 10
+      until: who is succeeded
+      changed_when: false
+      tags: [preflight]
+
+    - name: Preflight | Ensure Windows Time service is running
+      ansible.windows.win_service:
+        name: W32Time
+        state: started
+        start_mode: auto
+      changed_when: false
+      tags: [preflight]
+
+    - name: Preflight | Try a time resync (ignore if not applicable yet)
+      ansible.windows.win_shell: w32tm /resync /nowait
+      changed_when: false
+      failed_when: false
+      tags: [preflight]
+
+    - name: Set DNS client on both nodes to DC1 initially
+      ansible.windows.win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses: ["{{ dc1_ip }}"]
+
+    - name: Install ADDS, DNS, DHCP roles + tools
+      ansible.windows.win_feature:
+        name: [AD-Domain-Services, DNS, DHCP]
+        state: present
+        include_management_tools: yes
+      register: feat
+      retries: 3
+      delay: 30
+      until: feat is succeeded
+
+    # -----------------------------
+    # DC1: Create forest root domain
+    # -----------------------------
+    - name: Promote DC1 as forest root (creates AD-integrated DNS for {{ domain_name }})
+      microsoft.ad.domain:
+        dns_domain_name: "{{ domain_name }}"
+        safe_mode_password: "{{ ansible_password }}"
+        install_dns: true
+        reboot: true
+      when: inventory_hostname == "dc1"
+
+    - name: Wait for DC1 to come back after forest promotion
+      ansible.builtin.wait_for_connection:
+        timeout: 2400
+        connect_timeout: 60
+      when: inventory_hostname == "dc1"
+
+    - name: Wait for NetLogon/SYSVOL to be advertised (DC1)
+      ansible.windows.win_shell: nltest /dsgetdc:{{ domain_name }}
+      register: dc1_adv
+      retries: 30
+      delay: 20
+      until: dc1_adv.rc == 0
+      when: inventory_hostname == "dc1"
+
+    - name: Wait for SYSVOL share to exist (DC1)
+      ansible.windows.win_shell: |
+        if (Test-Path \\localhost\SYSVOL) { exit 0 } else { exit 1 }
+      register: sysvol1
+      retries: 30
+      delay: 20
+      until: sysvol1.rc == 0
+      when: inventory_hostname == "dc1"
+
+    - name: Configure DNS forwarders on DC1 (authoritative set)
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $current = (Get-DnsServerForwarder).IPAddress.IPAddressToString
+        $desired = @({{ dns_forwarders | map('quote') | join(', ') }})
+        if (-not (@($current) -ceq @($desired))) {
+          Set-DnsServerForwarder -IPAddress {{ dns_forwarders | join(',') }} -UseRootHint $false
+        }
+        Get-DnsServerForwarder | Format-List | Out-String
+      when: inventory_hostname == "dc1"
+      tags: [dns_forwarders]
+
+    # --------------------------------
+    # DC2: Join domain & promote to DC
+    # --------------------------------
+    - name: Ensure DC2 DNS points to DC1 before join
+      ansible.windows.win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses: ["{{ dc1_ip }}"]
+      when: inventory_hostname == "dc2"
+
+    - name: From DC2, wait for required ports on DC1 (LDAP/Kerberos/RPC/SMB/DNS)
+      ansible.windows.win_shell: |
+        $ports = 389,88,135,445,53
+        foreach ($p in $ports) {
+          $tcp = New-Object Net.Sockets.TcpClient
+          $res = $tcp.BeginConnect("{{ dc1_ip }}",$p,$null,$null)
+          if (-not $res.AsyncWaitHandle.WaitOne(600000)) { throw "Timeout waiting for port $p on DC1" }
+          $tcp.Close()
+        }
+      register: dc1_ports
+      retries: 6
+      delay: 10
+      until: dc1_ports is succeeded
+      when: inventory_hostname == "dc2"
+
+    - name: Detect current domain membership (DC2)
+      ansible.windows.win_shell: |
+        (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+      register: dc2_part_of_domain
+      changed_when: false
+      when: inventory_hostname == "dc2"
+
+    - name: Join DC2 to the domain (skip if already joined)
+      microsoft.ad.membership:
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ domain_admin_user }}"
+        domain_admin_password: "{{ domain_admin_password }}"
+        state: domain
+      register: join_res
+      retries: 3
+      delay: 30
+      until: join_res is succeeded
+      when:
+        - inventory_hostname == "dc2"
+        - dc2_part_of_domain.stdout | trim | lower != 'true'
+      tags: [join]
+
+    - name: Reboot DC2 after domain join (or just to stabilize)
+      ansible.windows.win_reboot:
+        pre_reboot_delay: 10
+        post_reboot_delay: 60
+        reboot_timeout: 2400
+        connect_timeout: 60
+      when: inventory_hostname == "dc2"
+
+    - name: Wait for DC2 after join
+      ansible.builtin.wait_for_connection:
+        timeout: 2400
+        connect_timeout: 60
+      when: inventory_hostname == "dc2"
+
+    - name: Ensure DC2 DNS still points to DC1 before promotion
+      ansible.windows.win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses: ["{{ dc1_ip }}"]
+      when: inventory_hostname == "dc2"
+
+    - name: Is DC2 already a DC?
+      ansible.windows.win_shell: |
+        try {
+          Import-Module ActiveDirectory
+          $null = Get-ADDomainController -Server localhost -ErrorAction Stop
+          'true'
+        } catch { 'false' }
+      register: dc2_is_dc
+      changed_when: false
+      when: inventory_hostname == "dc2"
+
+    - name: Promote DC2 to additional domain controller with DNS
+      microsoft.ad.domain_controller:
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ domain_admin_user }}"
+        domain_admin_password: "{{ domain_admin_password }}"
+        safe_mode_password: "{{ ansible_password }}"
+        install_dns: yes
+        state: domain_controller
+        reboot: true
+      register: promo_res
+      retries: 2
+      delay: 60
+      until: promo_res is succeeded
+      when:
+        - inventory_hostname == "dc2"
+        - dc2_is_dc.stdout | trim | lower != 'true'
+      tags: [promote]
+
+    - name: Wait for DC2 after DC promotion
+      ansible.builtin.wait_for_connection:
+        timeout: 2400
+        connect_timeout: 60
+      when: inventory_hostname == "dc2"
+
+    - name: Wait for NetLogon/SYSVOL to be advertised (DC2)
+      ansible.windows.win_shell: nltest /dsgetdc:{{ domain_name }}
+      register: dc2_adv
+      retries: 30
+      delay: 20
+      until: dc2_adv.rc == 0
+      when: inventory_hostname == "dc2"
+
+    - name: Wait for SYSVOL share to exist (DC2)
+      ansible.windows.win_shell: |
+        if (Test-Path \\localhost\SYSVOL) { exit 0 } else { exit 1 }
+      register: sysvol2
+      retries: 30
+      delay: 20
+      until: sysvol2.rc == 0
+      when: inventory_hostname == "dc2"
+
+    # --------------------------------
+    # DNS REPLICATION HARDENING
+    # --------------------------------
+    - name: Ensure DNS service is running on DC2
+      ansible.windows.win_service:
+        name: DNS
+        state: started
+        start_mode: auto
+      when: inventory_hostname == "dc2"
+      tags: [dns_replication]
+
+    - name: Enlist DC2 in Domain/Forest DNS application partitions
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $dom = "DomainDnsZones.{{ domain_name }}"
+        $for = "ForestDnsZones.{{ domain_name }}"
+        $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue
+        if (-not ($p | ? { $_.Name -ieq $dom -and $_.Enlisted })) {
+          Register-DnsServerDirectoryPartition -Name $dom -ComputerName localhost -ErrorAction SilentlyContinue
+        }
+        if (-not ($p | ? { $_.Name -ieq $for -and $_.Enlisted })) {
+          Register-DnsServerDirectoryPartition -Name $for -ComputerName localhost -ErrorAction SilentlyContinue
+        }
+      when: inventory_hostname == "dc2"
+      tags: [dns_replication]
+
+    - name: Convert imported zones on DC1 to AD-integrated + set Domain scope
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $zones = Get-Content "{{ dns_import_dir }}\zone_list.txt" -ErrorAction SilentlyContinue
+        if (-not $zones) { $zones = @("{{ domain_name }}") }  # fallback
+        foreach ($z in $zones) {
+          try {
+            $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
+            if (-not $cur.IsDsIntegrated) {
+              dnscmd /ZoneResetType $z /DsPrimary | Out-Null
+            }
+            if ($cur.ReplicationScope -ne 'Domain') {
+              Set-DnsServerPrimaryZone -Name $z -ReplicationScope Domain -PassThru | Out-Null
+            }
+          } catch {
+            Write-Host "Skip $z: $($_.Exception.Message)"
+          }
+        }
+      when: inventory_hostname == "dc1"
+      tags: [dns_replication]
+
+    - name: Force AD replication (config, schema, domain + DNS partitions) from DC1
+      ansible.windows.win_shell: repadmin /syncall /AdeP
+      when: inventory_hostname == "dc1"
+      tags: [dns_replication]
+
+    - name: Wait until all zones exist on DC2
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $zones = Get-Content "{{ dns_import_dir }}\zone_list.txt" -ErrorAction SilentlyContinue
+        if (-not $zones) { $zones = @("{{ domain_name }}") }  # fallback
+        $missing = @()
+        foreach ($z in $zones) {
+          try { $null = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop }
+          catch { $missing += $z }
+        }
+        if ($missing.Count -gt 0) { Write-Error ("Missing zones on DC2: {0}" -f ($missing -join ", ")) }
+        else { "All zones present on DC2" }
+      register: dc2_zone_presence
+      retries: 20
+      delay: 15
+      until: dc2_zone_presence is succeeded
+      when: inventory_hostname == "dc2"
+      tags: [dns_replication]
+
+    - name: Wait for SOA serial to match between DC1 and DC2 (strong replication check)
+      ansible.windows.win_shell: |
+        param($Peer)
+        Import-Module DnsServer
+        $zones = Get-Content "{{ dns_import_dir }}\zone_list.txt" -ErrorAction SilentlyContinue
+        if (-not $zones) { $zones = @("{{ domain_name }}") }  # fallback
+        $diverged = @()
+        foreach ($z in $zones) {
+          try {
+            $soa1 = (Get-DnsServerResourceRecord -ZoneName $z -RRType SOA -ComputerName localhost -ErrorAction Stop).RecordData.SerialNumber
+            $soa2 = (Get-DnsServerResourceRecord -ZoneName $z -RRType SOA -ComputerName $Peer     -ErrorAction Stop).RecordData.SerialNumber
+            if ($soa1 -ne $soa2) { $diverged += "$z ($soa1 != $soa2)" }
+          } catch {
+            $diverged += "$z (error: $($_.Exception.Message))"
+          }
+        }
+        if ($diverged.Count -gt 0) { Write-Error ("SOA serial mismatch: {0}" -f ($diverged -join ", ")) }
+        else { "SOA serials match for all zones" }
+      args:
+        executable: PowerShell
+      register: soa_converged
+      retries: 30
+      delay: 10
+      until: soa_converged is succeeded
+      when: inventory_hostname == "dc2"
+      vars:
+        Peer: "{{ dc1_ip }}"
+      tags: [dns_replication]
+
+    # --------------------------------
+    # Configure DNS forwarders on DC2
+    # --------------------------------
+    - name: Configure DNS forwarders (authoritative set)
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $desired = @({{ dns_forwarders | map('quote') | join(', ') }})
+        $cur = (Get-DnsServerForwarder -ErrorAction SilentlyContinue).IPAddress.IPAddressToString
+        if (-not $cur) { $cur = @() }
+        if (-not (@($cur) -ceq @($desired))) {
+          Set-DnsServerForwarder -IPAddress {{ dns_forwarders | join(',') }} -UseRootHint $false
+        }
+        Get-DnsServerForwarder | Format-List | Out-String
+      when: inventory_hostname == "dc2"
+      tags: [dns_forwarders]
+
+    # --------------------------------
+    # Extra safeguard: Wait for replication before DNS import
+    # --------------------------------
+    - name: Wait until key zone exists on BOTH DCs before import
+      ansible.windows.win_shell: |
+        try {
+          $zone = Get-DnsServerZone -Name "{{ domain_name }}" -ErrorAction Stop
+          if ($zone) { exit 0 } else { exit 1 }
+        } catch { exit 1 }
+      register: zone_ready
+      retries: 20
+      delay: 15
+      until: zone_ready.rc == 0
+      when: inventory_hostname == "dc1"
+
+    # --------------------------------
+    # DC1: Stage & run DNS import (tagged)
+    # --------------------------------
+    - name: Create import directory on DC1
+      ansible.windows.win_file:
+        path: "{{ dns_import_dir }}"
+        state: directory
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Copy DNS restore script and zone list to DC1
+      ansible.windows.win_copy:
+        src: "{{ item }}"
+        dest: "{{ dns_import_dir }}\\"
+      loop:
+        - files/dns_restore_3.ps1
+        - files/zone_list.txt
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Copy all zone files (*.dns) to DC1
+      ansible.windows.win_copy:
+        src: "files/zones/"
+        dest: "{{ dns_import_dir }}\\"
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Ensure DNS service is running (DC1)
+      ansible.windows.win_service:
+        name: DNS
+        state: started
+        start_mode: auto
+      when: inventory_hostname == "dc1"
+
+    # AD-integrated probe (no file-backed zones)
+    - name: Wait until DNS can create & delete a test AD-integrated zone (DC1)
+      ansible.windows.win_shell: |
+        Import-Module DnsServer
+        $z = 'ansible-probe.local'
+        try {
+          if (Get-DnsServerZone -Name $z -ErrorAction SilentlyContinue) {
+            Remove-DnsServerZone -Name $z -Force
+          }
+          Add-DnsServerPrimaryZone -Name $z -ReplicationScope Domain -PassThru | Out-Null
+          Remove-DnsServerZone -Name $z -Force -ErrorAction Stop
+          exit 0
+        } catch { exit 1 }
+      register: dns_writable
+      retries: 20
+      delay: 15
+      until: dns_writable.rc == 0
+      when: inventory_hostname == "dc1"
+
+    - name: Validate DNS import (DryRun) on DC1
+      ansible.windows.win_shell: |
+        Set-Location {{ dns_import_dir }}
+        powershell.exe -ExecutionPolicy Bypass -File .\dns_restore_3.ps1 -DryRun
+      args:
+        chdir: "{{ dns_import_dir }}"
+      when: inventory_hostname == "dc1"
+      tags: [dns_import]
+
+    - name: Run DNS import exactly once on DC1 (fail on real errors)
+      ansible.windows.win_shell: |
+        $ErrorActionPreference='Stop'
+        Set-Location {{ dns_import_dir }}
+        if (!(Test-Path .\import.done)) {
+          $out = powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\dns_restore_3.ps1 2>&1
+          $out | Out-String
+          New-Item -ItemType File .\import.done | Out-Null
+        } else { 'import.done present; skipping' }
+      args:
+        chdir: "{{ dns_import_dir }}"
+      register: import_run
+      when: inventory_hostname == "dc1"
+      changed_when: "'skipping' not in (import_run.stdout | default(''))"
+      failed_when: >
+        import_run.rc != 0 or
+        (
+          (import_run.stdout | default('')) is string and
+          ('Command failed' in import_run.stdout) and
+          (' 9711 ' not in import_run.stdout)
+        )
+      tags: [dns_import]
+
+    - name: Confirm key zone exists on DC1
+      ansible.windows.win_shell: "(Get-DnsServerZone -Name 'blox.corp' -ErrorAction Stop) | Out-String"
+      register: zone_check
+      when: inventory_hostname == "dc1"
+      changed_when: false
+      tags: [dns_import]
+
+    # --------------------------------
+    # Final DNS client settings on DC1/DC2
+    # --------------------------------
+    - name: Update DNS client on DC1/2 to use itself first, then peer
+      ansible.windows.win_dns_client:
+        adapter_names: '*'
+        ipv4_addresses:
+          - "{{ dc1_ip if inventory_hostname == 'dc1' else dc2_ip }}"
+          - "{{ dc2_ip if inventory_hostname == 'dc1' else dc1_ip }}"
+
+    # --------------------------------
+    # Copy migration helper scripts to both DCs
+    # --------------------------------
+    - name: Ensure C:\infoblox exists
+      ansible.windows.win_file:
+        path: C:\infoblox
+        state: directory
+      tags: [migration_scripts]
+
+    - name: Copy migration scripts to C:\infoblox
+      ansible.windows.win_copy:
+        src: "{{ playbook_dir }}/migration/{{ item }}"
+        dest: "C:\\infoblox\\"
+      loop:
+        - ad-dc-convert-go-live.cmd
+        - ad-dc-convert-roll-back.cmd
+        - extract-ms-dns.ps1
+      tags: [migration_scripts]
+
+    - name: Unblock PowerShell scripts in C:\infoblox
+      ansible.windows.win_shell: |
+        $files = Get-ChildItem -Path 'C:\infoblox' -Filter *.ps1 -File -ErrorAction SilentlyContinue
+        foreach ($f in $files) {
+          try { Unblock-File -Path $f.FullName -ErrorAction Stop }
+          catch { Remove-Item -Path ($f.FullName + ':Zone.Identifier') -ErrorAction SilentlyContinue }
+        }
+      args:
+        executable: PowerShell
+      changed_when: false
+      tags: [migration_scripts]

@@ -7,7 +7,7 @@
     domain_netbios: CORP
     domain_admin_password: "{{ ansible_password }}"
     dc1_ip: 10.100.1.100
-    dc2_ip: 10.100.1.101
+    dc2_ip: 10.100.2.100
     dns_forwarders: [8.8.8.8, 1.1.1.1]
     dns_import_dir: 'C:\dns-import'
 

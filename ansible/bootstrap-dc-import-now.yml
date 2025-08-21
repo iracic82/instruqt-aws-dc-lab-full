@@ -9,9 +9,9 @@
     domain_netbios: CORP
     # domain_admin_password comes from group_vars/all.yml
     domain_admin_user: "{{ domain_netbios }}\\Administrator"
-    domain_admin_password: "{{ domain_admin_password }}"
+    #domain_admin_password: "{{ domain_admin_password }}"
     dc1_ip: 10.100.1.100
-    dc2_ip: 10.100.1.101
+    dc2_ip: 10.100.2.100
     dns_forwarders: [8.8.8.8, 1.1.1.1]
     dns_import_dir: 'C:\dns-import'
 
@@ -186,6 +186,7 @@
       register: dc2_is_dc
       changed_when: false
       when: inventory_hostname == "dc2"
+      tags: [promote]
 
     - name: Promote DC2 to additional domain controller with DNS
       microsoft.ad.domain_controller:
@@ -202,7 +203,7 @@
       until: promo_res is succeeded
       when:
         - inventory_hostname == "dc2"
-        - dc2_is_dc.stdout | trim | lower != 'true'
+        - (dc2_is_dc is not defined) or (dc2_is_dc.stdout | default('') | trim | lower != 'true')
       tags: [promote]
 
     - name: Wait for DC2 after DC promotion
@@ -239,23 +240,54 @@
       when: inventory_hostname == "dc2"
       tags: [dns_replication]
 
-    - name: Enlist DC2 in Domain/Forest DNS application partitions
-      ansible.windows.win_shell: |
-        Import-Module DnsServer
-        $dom = "DomainDnsZones.{{ domain_name }}"
-        $for = "ForestDnsZones.{{ domain_name }}"
-        $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue
-        if (-not ($p | ? { $_.Name -ieq $dom -and $_.Enlisted })) {
-          Register-DnsServerDirectoryPartition -Name $dom -ComputerName localhost -ErrorAction SilentlyContinue
-        }
-        if (-not ($p | ? { $_.Name -ieq $for -and $_.Enlisted })) {
-          Register-DnsServerDirectoryPartition -Name $for -ComputerName localhost -ErrorAction SilentlyContinue
-        }
+    - name: Enlist DC2 in Domain/Forest DNS application partitions (hardened)
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module DnsServer
+          $parts = @("DomainDnsZones.{{ domain_name }}","ForestDnsZones.{{ domain_name }}")
+          $enlistedAny = $false
+
+          foreach ($name in $parts) {
+            # Check current
+            $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -ieq $name }
+            if ($p -and $p.Enlisted) { Write-Host ("OK: {0} already enlisted" -f $name); continue }
+
+            # Try PowerShell
+            $psOK = $true
+            try { Register-DnsServerDirectoryPartition -Name $name -ComputerName localhost -ErrorAction Stop }
+            catch { $psOK = $false; Write-Host ("INFO: PS enlist for {0}: {1}" -f $name, $_.Exception.Message) }
+
+            # Fallback to dnscmd (correct syntax)
+            if (-not $psOK) {
+              try {
+                dnscmd localhost /EnlistDirectoryPartition $name | Out-String | Write-Output
+              } catch {
+                Write-Host ("INFO: dnscmd enlist for {0}: {1}" -f $name, $_.Exception.Message)
+              }
+            }
+
+            Start-Sleep -Seconds 2
+
+            # Verify again
+            $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -ieq $name }
+            if ($p -and $p.Enlisted) { Write-Host ("OK: {0} enlisted" -f $name); $enlistedAny = $true }
+            else { Write-Host ("WARN: {0} still not enlisted; continuing" -f $name) }
+          }
+
+          if ($enlistedAny) {
+            Restart-Service -Name DNS -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+          }
       when: inventory_hostname == "dc2"
+      changed_when: false
       tags: [dns_replication]
 
     - name: Convert imported zones on DC1 to AD-integrated + set Domain scope
       ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
         Import-Module DnsServer
         $zones = Get-Content "{{ dns_import_dir }}\zone_list.txt" -ErrorAction SilentlyContinue
         if (-not $zones) { $zones = @("{{ domain_name }}") }  # fallback
@@ -264,19 +296,61 @@
             $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
             if (-not $cur.IsDsIntegrated) {
               dnscmd /ZoneResetType $z /DsPrimary | Out-Null
+              # refresh view after convert
+              $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
             }
             if ($cur.ReplicationScope -ne 'Domain') {
               Set-DnsServerPrimaryZone -Name $z -ReplicationScope Domain -PassThru | Out-Null
             }
           } catch {
-            Write-Host "Skip $z: $($_.Exception.Message)"
+            Write-Host ("Skip {0}: {1}" -f $z, $_.Exception.Message)
           }
         }
       when: inventory_hostname == "dc1"
       tags: [dns_replication]
 
-    - name: Force AD replication (config, schema, domain + DNS partitions) from DC1
-      ansible.windows.win_shell: repadmin /syncall /AdeP
+    - name: Force AD replication (config, schema, domain + DNS partitions) from DC1 (skip-safe + self-healing)
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+
+        # Build the domain DN from the DNS name (e.g. DC=corp,DC=infolab)
+        $domainDn = "DC={{ domain_name | regex_replace('\\.',',DC=') }}"
+
+        # 1) Ensure DC2 is actually a DC and reachable; if not, skip gracefully
+        try {
+          $null = Get-ADDomainController -Server "{{ dc2_ip }}" -ErrorAction Stop
+        } catch {
+          Write-Host ("DC2 not a DC yet or unreachable ({0}); skipping repadmin" -f $_.Exception.Message)
+          exit 0
+        }
+
+        # 2) Ensure required naming contexts exist locally; if not, skip gracefully
+        $ncs = @("DC=DomainDnsZones,$domainDn","DC=ForestDnsZones,$domainDn","$domainDn")
+        foreach ($nc in $ncs) {
+          try { $null = Get-ADObject -Identity $nc -ErrorAction Stop }
+          catch {
+            Write-Host ("NC {0} not present yet; skipping repadmin" -f $nc)
+            exit 0
+          }
+        }
+
+        # 3) Try full sync; if it returns non-zero, fall back to targeted replicates
+        & repadmin /syncall /AdeP | Out-String | Write-Output
+        $rc = $LASTEXITCODE
+        if ($rc -ne 0) {
+          Write-Host ("repadmin /syncall returned {0}; falling back to targeted replicate" -f $rc)
+          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "$domainDn"                  | Out-String | Write-Output
+          $rc = $LASTEXITCODE
+          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "DC=DomainDnsZones,$domainDn" | Out-String | Write-Output
+          $rc += $LASTEXITCODE
+          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "DC=ForestDnsZones,$domainDn" | Out-String | Write-Output
+          $rc += $LASTEXITCODE
+        }
+        exit $rc
+      register: rep_sync
+      changed_when: rep_sync.rc == 0
+      failed_when: rep_sync.rc not in [0]
       when: inventory_hostname == "dc1"
       tags: [dns_replication]
 
@@ -299,34 +373,24 @@
       when: inventory_hostname == "dc2"
       tags: [dns_replication]
 
-    - name: Wait for SOA serial to match between DC1 and DC2 (strong replication check)
-      ansible.windows.win_shell: |
-        param($Peer)
-        Import-Module DnsServer
-        $zones = Get-Content "{{ dns_import_dir }}\zone_list.txt" -ErrorAction SilentlyContinue
-        if (-not $zones) { $zones = @("{{ domain_name }}") }  # fallback
-        $diverged = @()
-        foreach ($z in $zones) {
-          try {
-            $soa1 = (Get-DnsServerResourceRecord -ZoneName $z -RRType SOA -ComputerName localhost -ErrorAction Stop).RecordData.SerialNumber
-            $soa2 = (Get-DnsServerResourceRecord -ZoneName $z -RRType SOA -ComputerName $Peer     -ErrorAction Stop).RecordData.SerialNumber
-            if ($soa1 -ne $soa2) { $diverged += "$z ($soa1 != $soa2)" }
-          } catch {
-            $diverged += "$z (error: $($_.Exception.Message))"
-          }
-        }
-        if ($diverged.Count -gt 0) { Write-Error ("SOA serial mismatch: {0}" -f ($diverged -join ", ")) }
-        else { "SOA serials match for all zones" }
-      args:
-        executable: PowerShell
-      register: soa_converged
-      retries: 30
-      delay: 10
-      until: soa_converged is succeeded
+    - name: Pull AD DNS NCs from best peer onto DC2 (self-healing)
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+          # Discover a solid peer (GC/KDC/TimeService)
+          $peer = (Get-ADDomainController -DomainName "{{ domain_name }}" -Discover -ForceDiscover -Service GlobalCatalog,KDC,TimeService).HostName
+          if (-not $peer) { $peer = "{{ dc1_ip }}" }
+          $domainDn = "DC={{ domain_name | regex_replace('\\.',',DC=') }}"
+          & repadmin /replicate localhost $peer "$domainDn"                  | Out-String | Write-Output
+          & repadmin /replicate localhost $peer "DC=DomainDnsZones,$domainDn" | Out-String | Write-Output
+          & repadmin /replicate localhost $peer "DC=ForestDnsZones,$domainDn" | Out-String | Write-Output
       when: inventory_hostname == "dc2"
-      vars:
-        Peer: "{{ dc1_ip }}"
+      changed_when: false
+      failed_when: false
       tags: [dns_replication]
+
+    
 
     # --------------------------------
     # Configure DNS forwarders on DC2

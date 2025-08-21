@@ -1,31 +1,25 @@
-- name: Build AD forest, add 2nd DC, and import DNS zones/records (microsoft.ad)
+- name: Prep + parallel feature install (no DHCP, no WU)
   hosts: windows
   gather_facts: no
-  serial: 1
-  strategy: linear
+  strategy: free
 
   vars:
     domain_name: corp.infolab
     domain_netbios: CORP
-    # domain_admin_password comes from group_vars/all.yml
     domain_admin_user: "{{ domain_netbios }}\\Administrator"
-    #domain_admin_password: "{{ domain_admin_password }}"
     dc1_ip: 10.100.1.100
     dc2_ip: 10.100.2.100
     dns_forwarders: [8.8.8.8, 1.1.1.1]
     dns_import_dir: 'C:\dns-import'
 
-    # WinRM stability knobs
+    # WinRM stability knobs (inventory can override)
     ansible_connection: winrm
     ansible_winrm_transport: ntlm
     ansible_winrm_server_cert_validation: ignore
-    ansible_winrm_operation_timeout_sec: 60
-    ansible_winrm_read_timeout_sec: 70
+    ansible_winrm_operation_timeout_sec: 120
+    ansible_winrm_read_timeout_sec: 140
 
   tasks:
-    # -----------------------------
-    # Preflight (auth + time)
-    # -----------------------------
     - name: Preflight | Verify WinRM auth on each host
       ansible.windows.win_whoami:
       register: who
@@ -54,37 +48,77 @@
         adapter_names: '*'
         ipv4_addresses: ["{{ dc1_ip }}"]
 
-    # -----------------------------
-    # FAST PATH FEATURE INSTALL (ADDS + DNS only)
-    # -----------------------------
-    - name: Pre-install | Reboot if Windows has a pending reboot
-      ansible.windows.win_powershell:
-        script: |
-          $pending = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
-          if ($pending) { 'REBOOT_NEEDED' } else { 'OK' }
-      register: pre_reboot_check
-      changed_when: "'REBOOT_NEEDED' in (pre_reboot_check.stdout | default(''))"
+    # ---- Block Windows Update so feature install never pulls from WU ----
+    - name: Disable Windows Update service (wuauserv)
+      ansible.windows.win_service:
+        name: wuauserv
+        state: stopped
+        start_mode: disabled
+      failed_when: false
+      changed_when: false
 
-    - name: Pre-install | Reboot Windows (pending reboot was detected)
-      ansible.windows.win_reboot:
-      when: "'REBOOT_NEEDED' in (pre_reboot_check.stdout | default(''))"
+    - name: Disable Update Orchestrator service (UsoSvc)
+      ansible.windows.win_service:
+        name: usosvc
+        state: stopped
+        start_mode: disabled
+      failed_when: false
+      changed_when: false
 
-    - name: Install ADDS + DNS roles (async, subfeatures)
+    - name: Disable Delivery Optimization (DoSvc) to be safe
+      ansible.windows.win_service:
+        name: dosvc
+        state: stopped
+        start_mode: disabled
+      failed_when: false
+      changed_when: false
+
+    # ---- Parallel feature install (ADDS + DNS only) with async watchdog ----
+    - name: Install ADDS + DNS roles & tools (parallel)
       ansible.windows.win_feature:
         name:
           - AD-Domain-Services
           - DNS
         state: present
         include_management_tools: yes
-        include_sub_features: yes
-      register: adds_dns_feat
-      async: 1800
+      async: 3600
       poll: 15
+      register: feat
 
-    - name: Reboot if ADDS/DNS requested it
-      ansible.windows.win_reboot:
-      when: adds_dns_feat.reboot_required | default(false) | bool
+    - name: Assert feature install succeeded
+      ansible.builtin.assert:
+        that: feat is succeeded
+        fail_msg: "Feature install failed on {{ inventory_hostname }} (see previous task output)"
+      # let each host progress on its own (strategy: free)
+      changed_when: false
 
+
+# =====================================================================
+
+- name: Build AD forest, add 2nd DC, and import DNS zones/records (microsoft.ad)
+  hosts: windows
+  gather_facts: no
+  serial: 1
+  strategy: linear
+
+  vars:
+    domain_name: corp.infolab
+    domain_netbios: CORP
+    domain_admin_user: "{{ domain_netbios }}\\Administrator"
+    # Expect domain_admin_password to be defined in group_vars or via -e
+    dc1_ip: 10.100.1.100
+    dc2_ip: 10.100.2.100
+    dns_forwarders: [8.8.8.8, 1.1.1.1]
+    dns_import_dir: 'C:\dns-import'
+
+    # WinRM stability knobs (inventory can override)
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_winrm_server_cert_validation: ignore
+    ansible_winrm_operation_timeout_sec: 120
+    ansible_winrm_read_timeout_sec: 140
+
+  tasks:
     # -----------------------------
     # DC1: Create forest root domain
     # -----------------------------
@@ -270,21 +304,28 @@
           $enlistedAny = $false
 
           foreach ($name in $parts) {
+            # Check current
             $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -ieq $name }
             if ($p -and $p.Enlisted) { Write-Host ("OK: {0} already enlisted" -f $name); continue }
 
+            # Try PowerShell
             $psOK = $true
             try { Register-DnsServerDirectoryPartition -Name $name -ComputerName localhost -ErrorAction Stop }
             catch { $psOK = $false; Write-Host ("INFO: PS enlist for {0}: {1}" -f $name, $_.Exception.Message) }
 
+            # Fallback to dnscmd (correct syntax)
             if (-not $psOK) {
-              try { dnscmd localhost /EnlistDirectoryPartition $name | Out-String | Write-Output }
-              catch { Write-Host ("INFO: dnscmd enlist for {0}: {1}" -f $name, $_.Exception.Message) }
+              try {
+                dnscmd localhost /EnlistDirectoryPartition $name | Out-String | Write-Output
+              } catch {
+                Write-Host ("INFO: dnscmd enlist for {0}: {1}" -f $name, $_.Exception.Message)
+              }
             }
 
             Start-Sleep -Seconds 2
 
+            # Verify again
             $p = Get-DnsServerDirectoryPartition -ComputerName localhost -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -ieq $name }
             if ($p -and $p.Enlisted) { Write-Host ("OK: {0} enlisted" -f $name); $enlistedAny = $true }
@@ -299,49 +340,38 @@
       changed_when: false
       tags: [dns_replication]
 
-    - name: Convert imported zones on DC1 to AD-integrated + set Domain scope
-      ansible.windows.win_shell: |
-        $ErrorActionPreference = 'Stop'
-        Import-Module DnsServer
-        $zones = Get-Content "{{ dns_import_dir }}\zone_list.txt" -ErrorAction SilentlyContinue
-        if (-not $zones) { $zones = @("{{ domain_name }}") }  # fallback
-        foreach ($z in $zones) {
-          try {
-            $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
-            if (-not $cur.IsDsIntegrated) {
-              dnscmd /ZoneResetType $z /DsPrimary | Out-Null
-              $cur = Get-DnsServerZone -ComputerName localhost -Name $z -ErrorAction Stop
-            }
-            if ($cur.ReplicationScope -ne 'Domain') {
-              Set-DnsServerPrimaryZone -Name $z -ReplicationScope Domain -PassThru | Out-Null
-            }
-          } catch {
-            Write-Host ("Skip {0}: {1}" -f $z, $_.Exception.Message)
-          }
-        }
-      when: inventory_hostname == "dc1"
-      tags: [dns_replication]
-
     - name: Force AD replication (config, schema, domain + DNS partitions) from DC1 (skip-safe + self-healing)
       ansible.windows.win_shell: |
         $ErrorActionPreference = 'Stop'
         Import-Module ActiveDirectory
+
+        # Build the domain DN from the DNS name (e.g. DC=corp,DC=infolab)
         $domainDn = "DC={{ domain_name | regex_replace('\\.',',DC=') }}"
 
-        try { $null = Get-ADDomainController -Server "{{ dc2_ip }}" -ErrorAction Stop }
-        catch { Write-Host ("DC2 not a DC yet or unreachable ({0}); skipping repadmin" -f $_.Exception.Message); exit 0 }
+        # 1) Ensure DC2 is actually a DC and reachable; if not, skip gracefully
+        try {
+          $null = Get-ADDomainController -Server "{{ dc2_ip }}" -ErrorAction Stop
+        } catch {
+          Write-Host ("DC2 not a DC yet or unreachable ({0}); skipping repadmin" -f $_.Exception.Message)
+          exit 0
+        }
 
+        # 2) Ensure required naming contexts exist locally; if not, skip gracefully
         $ncs = @("DC=DomainDnsZones,$domainDn","DC=ForestDnsZones,$domainDn","$domainDn")
         foreach ($nc in $ncs) {
           try { $null = Get-ADObject -Identity $nc -ErrorAction Stop }
-          catch { Write-Host ("NC {0} not present yet; skipping repadmin" -f $nc); exit 0 }
+          catch {
+            Write-Host ("NC {0} not present yet; skipping repadmin" -f $nc)
+            exit 0
+          }
         }
 
+        # 3) Try full sync; if it returns non-zero, fall back to targeted replicates
         & repadmin /syncall /AdeP | Out-String | Write-Output
         $rc = $LASTEXITCODE
         if ($rc -ne 0) {
           Write-Host ("repadmin /syncall returned {0}; falling back to targeted replicate" -f $rc)
-          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "$domainDn"                   | Out-String | Write-Output
+          & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "$domainDn"                  | Out-String | Write-Output
           $rc = $LASTEXITCODE
           & repadmin /replicate "{{ dc2_ip }}" "{{ dc1_ip }}" "DC=DomainDnsZones,$domainDn" | Out-String | Write-Output
           $rc += $LASTEXITCODE
@@ -379,6 +409,7 @@
         script: |
           $ErrorActionPreference = 'Stop'
           Import-Module ActiveDirectory
+          # Discover a solid peer (GC/KDC/TimeService)
           $peer = (Get-ADDomainController -DomainName "{{ domain_name }}" -Discover -ForceDiscover -Service GlobalCatalog,KDC,TimeService).HostName
           if (-not $peer) { $peer = "{{ dc1_ip }}" }
           $domainDn = "DC={{ domain_name | regex_replace('\\.',',DC=') }}"
@@ -455,6 +486,7 @@
         start_mode: auto
       when: inventory_hostname == "dc1"
 
+    # AD-integrated probe (no file-backed zones)
     - name: Wait until DNS can create & delete a test AD-integrated zone (DC1)
       ansible.windows.win_shell: |
         Import-Module DnsServer

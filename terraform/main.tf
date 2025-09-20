@@ -218,7 +218,7 @@ resource "aws_network_interface" "dc2_eni" {
 
 resource "aws_instance" "dc1" {
   #ami           = data.aws_ami.windows.id
-  ami           = "ami-046cca4080fb21c05"
+  ami           = "ami-07de76315132d06c0"
   instance_type = "t3.medium"
   key_name      = aws_key_pair.rdp.key_name
 
@@ -227,7 +227,7 @@ resource "aws_instance" "dc1" {
     device_index         = 0
   }
 
-  user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
+  user_data = templatefile("./scripts/optimized-user-data.ps1.tpl", {
     admin_password = var.windows_admin_password
   })
 
@@ -240,7 +240,7 @@ resource "aws_instance" "dc1" {
 
 resource "aws_instance" "dc2" {
   #ami           = data.aws_ami.windows.id
-  ami           = "ami-046cca4080fb21c05"
+  ami           = "ami-07de76315132d06c0"
   instance_type = "t3.medium"
   key_name      = aws_key_pair.rdp.key_name
 
@@ -249,7 +249,7 @@ resource "aws_instance" "dc2" {
     device_index         = 0
   }
 
-  user_data = templatefile("./scripts/winrm-init.ps1.tpl", {
+  user_data = templatefile("./scripts/optimized-user-data.ps1.tpl", {
     admin_password = var.windows_admin_password
   })
 

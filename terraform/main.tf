@@ -217,7 +217,8 @@ resource "aws_network_interface" "dc2_eni" {
 }
 
 resource "aws_instance" "dc1" {
-  ami           = data.aws_ami.windows.id
+  #ami           = data.aws_ami.windows.id
+  ami           = "ami-046cca4080fb21c05"
   instance_type = "t3.medium"
   key_name      = aws_key_pair.rdp.key_name
 
@@ -238,7 +239,8 @@ resource "aws_instance" "dc1" {
 }
 
 resource "aws_instance" "dc2" {
-  ami           = data.aws_ami.windows.id
+  #ami           = data.aws_ami.windows.id
+  ami           = "ami-046cca4080fb21c05"
   instance_type = "t3.medium"
   key_name      = aws_key_pair.rdp.key_name
 

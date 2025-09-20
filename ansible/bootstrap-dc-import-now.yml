@@ -395,7 +395,7 @@
         if ($missing.Count -gt 0) { Write-Error ("Missing zones on DC2: {0}" -f ($missing -join ", ")) }
         else { "All zones present on DC2" }
       register: dc2_zone_presence
-      retries: 20
+      retries: 25
       delay: 15
       until: dc2_zone_presence is succeeded
       when: inventory_hostname == "dc2"

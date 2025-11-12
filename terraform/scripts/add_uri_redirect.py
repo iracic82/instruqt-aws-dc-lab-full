@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-ENVIRONMENT_ID = '76c431af-e4c2-40e9-8198-0b373f232253'
-APPLICATION_ID = '6a92b141-0192-4247-9663-a40792bbc0ac'
+ENVIRONMENT_ID = os.getenv('TF_VAR_pingone_target_env_id')
+APPLICATION_ID = os.getenv('TF_VAR_pingone_application_id')
 REGION = 'northamerica'
 
 # Worker App Credentials
